@@ -1,0 +1,247 @@
+# value expressions: scalars, arrays and inline tables
+
+use std.allocator.Allocator;
+use std.allocator.Error;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use toml.error.TomlError;
+use toml.error.at;
+use toml.key.navigate_segs;
+use toml.key.parse_key_path;
+use toml.number.parse_number;
+use toml.scan.is_value_term;
+use toml.scan.skip_ws;
+use toml.scan.skip_ws_comments_newlines;
+use toml.string.parse_basic_string;
+use toml.string.parse_literal_string;
+use toml.tree.KeySegs;
+use toml.tree.array_dnit;
+use toml.tree.array_push;
+use toml.tree.dnit;
+use toml.tree.keysegs_dnit;
+use toml.tree.keysegs_make;
+use toml.tree.table_set;
+use toml.tree.value_dnit;
+use toml.value.Array;
+use toml.value.Table;
+use toml.value.Value;
+use toml.value.array_make;
+use toml.value.span_from;
+use toml.value.table_make;
+use toml.value.value_array;
+use toml.value.value_bool;
+use toml.value.value_fail;
+use toml.value.value_ok;
+use toml.value.value_string;
+use toml.value.value_table;
+
+# parse "true" or "false"
+fun parse_bool_val(src: str, i: *usize) res[Value, TomlError] {
+    if (src[@i] == 't' && src[@i + 1] == 'r' && src[@i + 2] == 'u' && src[@i + 3] == 'e') {
+        if (!is_value_term(src[@i + 4])) { ret value_fail(TomlError.syntax{@i + 4}); }
+        @i = @i + 4;
+        ret value_ok(value_bool(true));
+    }
+    if (src[@i] == 'f' && src[@i + 1] == 'a' && src[@i + 2] == 'l' && src[@i + 3] == 's' && src[@i + 4] == 'e') {
+        if (!is_value_term(src[@i + 5])) { ret value_fail(TomlError.syntax{@i + 5}); }
+        @i = @i + 5;
+        ret value_ok(value_bool(false));
+    }
+    ret value_fail(TomlError.syntax{@i});
+}
+
+# how many containers a value may nest inside before the reader refuses
+#
+# arrays and inline tables descend through parse_value, so nesting depth is a
+# count taken straight from the document: without a stated bound the only limit
+# is whatever stack the process happens to have, and a document deep enough to
+# exhaust it kills the reader rather than being rejected by it. sixty-four is
+# far past anything a hand-written document reaches and far short of any stack
+# the reader runs on.
+pub val MAX_VALUE_DEPTH: usize = 64;
+
+# parse a TOML value at the current position, recording its literal's span
+# ---
+# a:     allocator
+# src:   source text
+# i:     cursor position
+# depth: how many arrays and inline tables enclose this value
+# ret:   parsed Value, or the failure
+pub fun parse_value(a: *Allocator, src: str, i: *usize, depth: usize) res[Value, TomlError] {
+    skip_ws(src, i);
+    val start: usize                 = @i;
+    val r:     res[Value, TomlError] = parse_value_literal(a, src, i, depth);
+    if (sel r.err) { ret r; }
+    var v: Value = r.ok;
+    v.span = span_from(start, @i);
+    ret value_ok(v);
+}
+
+# the value dispatch, cursor on the literal's first byte
+fun parse_value_literal(a: *Allocator, src: str, i: *usize, depth: usize) res[Value, TomlError] {
+    if (depth > MAX_VALUE_DEPTH) { ret value_fail(TomlError.depth{@i}); }
+
+    val b: u8 = src[@i];
+
+    if (b == '"') {
+        val r: res[str, TomlError] = parse_basic_string(a, src, i);
+        if (sel r.err) { ret value_fail(r.err); }
+        ret value_ok(value_string(r.ok));
+    }
+
+    if (b == '\'') {
+        val r: res[str, TomlError] = parse_literal_string(a, src, i);
+        if (sel r.err) { ret value_fail(r.err); }
+        ret value_ok(value_string(r.ok));
+    }
+
+    if (b == 't' || b == 'f') {
+        ret parse_bool_val(src, i);
+    }
+
+    if (b == '[') {
+        ret parse_array_value(a, src, i, depth + 1);
+    }
+
+    if (b == '{') {
+        ret parse_inline_table(a, src, i, depth + 1);
+    }
+
+    if (b == '+' || b == '-' || (b >= '0' && b <= '9') || b == 'i' || b == 'n') {
+        ret parse_number(src, i);
+    }
+
+    ret value_fail(TomlError.syntax{@i});
+}
+
+# parse a TOML array [...]
+#
+# the array under construction is released on every failure inside it.
+# ---
+# a:     allocator
+# src:   source text
+# i:     cursor position (on the '[')
+# depth: how many containers enclose this array, itself included
+# ret:   parsed array Value, or the failure
+fun parse_array_value(a: *Allocator, src: str, i: *usize, depth: usize) res[Value, TomlError] {
+    @i = @i + 1;
+    var arr: Array = array_make();
+
+    for {
+        skip_ws_comments_newlines(src, i);
+        if (src[@i] == ']') {
+            @i = @i + 1;
+            brk;
+        }
+
+        val vr: res[Value, TomlError] = parse_value(a, src, i, depth);
+        if (sel vr.err) {
+            array_dnit(a, ?arr);
+            ret vr;
+        }
+
+        val pr: err[Error] = array_push(a, ?arr, vr.ok);
+        if (sel pr.err) {
+            var parsed: Value = vr.ok;
+            value_dnit(a, ?parsed);
+            array_dnit(a, ?arr);
+            ret value_fail(TomlError.alloc{pr.err});
+        }
+
+        skip_ws_comments_newlines(src, i);
+        if (src[@i] == ',') {
+            @i = @i + 1;
+            cnt;
+        }
+    }
+
+    ret value_ok(value_array(arr));
+}
+
+# parse a TOML inline table {...}
+# ---
+# a:     allocator
+# src:   source text
+# i:     cursor position (on the '{')
+# depth: how many containers enclose this table, itself included
+# ret:   parsed table Value, or the failure
+fun parse_inline_table(a: *Allocator, src: str, i: *usize, depth: usize) res[Value, TomlError] {
+    @i = @i + 1;
+    var t:  Table   = table_make();
+    var ks: KeySegs = keysegs_make();
+
+    skip_ws(src, i);
+    if (src[@i] == '}') {
+        @i = @i + 1;
+        ret value_ok(value_table(t));
+    }
+
+    val r: err[TomlError] = parse_inline_entries(a, src, i, ?t, ?ks, depth);
+    keysegs_dnit(a, ?ks);
+    if (sel r.err) {
+        dnit(a, ?t);
+        ret value_fail(r.err);
+    }
+    ret value_ok(value_table(t));
+}
+
+# the inline table's entry loop, split out for the same reason `parse_walk` is:
+# `t` and `ks` are owned by the caller, so an error return here cannot strand the
+# partially built table or the key path in flight
+# ---
+# a:   allocator for parsed storage
+# src: document text
+# i:   cursor, positioned after the opening brace
+# t:   the inline table being built
+# ks:  scratch key-path segments, owned by the caller
+# ret: ok when the closing brace was consumed, or the parse failure
+fun parse_inline_entries(a: *Allocator, src: str, i: *usize, t: *Table, ks: *KeySegs, depth: usize) err[TomlError] {
+    for {
+        skip_ws(src, i);
+
+        keysegs_dnit(a, ks);
+        val key_at: usize          = @i;
+        val ksr:    err[TomlError] = parse_key_path(a, src, i, ks);
+        if (sel ksr.err) { ret ksr; }
+
+        skip_ws(src, i);
+        if (src[@i] != '=') { ret err[TomlError].err{TomlError.syntax{@i}}; }
+        @i = @i + 1;
+
+        val vr: res[Value, TomlError] = parse_value(a, src, i, depth);
+        if (sel vr.err) { ret err[TomlError].err{vr.err}; }
+
+        var parsed: Value = vr.ok;
+        parsed.key = ks.spans[ks.len - 1];
+
+        val nr: res[*Table, TomlError] = navigate_segs(a, t, ks);
+        if (sel nr.err) {
+            value_dnit(a, ?parsed);
+            ret err[TomlError].err{at(nr.err, key_at)};
+        }
+
+        val sr: err[Error] = table_set(a, nr.ok, ks.segs[ks.len - 1], parsed);
+        if (sel sr.err) {
+            value_dnit(a, ?parsed);
+            ret err[TomlError].err{TomlError.alloc{sr.err}};
+        }
+
+        skip_ws(src, i);
+        if (src[@i] == ',') {
+            @i = @i + 1;
+            cnt;
+        }
+        if (src[@i] == '}') {
+            @i = @i + 1;
+            brk;
+        }
+
+        ret err[TomlError].err{TomlError.syntax{@i}};
+    }
+
+    ret err[TomlError].ok{};
+}

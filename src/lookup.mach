@@ -1,0 +1,212 @@
+# typed reads of a parsed tree by dotted path and by index
+
+use std.memory;
+use std.types.bool.bool;
+use std.types.option.opt;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_equals;
+use std.types.string.str_len;
+use toml.value.Array;
+use toml.value.TYPE_ARRAY;
+use toml.value.TYPE_BOOL;
+use toml.value.TYPE_FLOAT;
+use toml.value.TYPE_INTEGER;
+use toml.value.TYPE_STRING;
+use toml.value.TYPE_TABLE;
+use toml.value.Table;
+use toml.value.Value;
+
+# find a value by key in a table
+# ---
+# t:   table to search
+# key: key string to match
+# ret: pointer to the value, or nil if not found
+pub fun table_find(t: *Table, key: str) *Value {
+    if (t == nil || t.len == 0) { ret nil; }
+    val keys: *str   = t.keys::*str;
+    val vals: *Value = t.values::*Value;
+    var i:    usize  = 0;
+    for (i < t.len) {
+        if (str_equals(keys[i], key)) {
+            ret ?vals[i];
+        }
+        i = i + 1;
+    }
+    ret nil;
+}
+
+# look up a value by dotted path in a table
+#
+# walks nested tables for each dot-separated segment. for keys that
+# contain literal dots, use get_table() then iterate with table_key().
+# the pointer borrows the table and expires with dnit.
+# ---
+# t:    root table
+# path: dotted key path (e.g. "project.name")
+# ret:  the value, or none when a segment of the path is not present or an
+#       inner segment is not a table
+pub fun get(t: *Table, path: str) opt[*Value] {
+    if (path == nil) { ret opt[*Value].none{}; }
+
+    var current: *Table = t;
+    var start:   usize  = 0;
+    var i:       usize  = 0;
+
+    for (path[i] != 0) {
+        if (path[i] == '.') {
+            val v: *Value = find_by_seg(current, (path::usize + start)::str, i - start);
+            if (v == nil || v.tag != TYPE_TABLE) { ret opt[*Value].none{}; }
+            current = ?v.data.table;
+            start   = i + 1;
+        }
+        i = i + 1;
+    }
+
+    val found: *Value = find_by_seg(current, (path::usize + start)::str, i - start);
+    if (found == nil) { ret opt[*Value].none{}; }
+    ret opt[*Value].some{found};
+}
+
+# the value at a path when it has the wanted shape
+fun get_typed(t: *Table, path: str, tag: u8) *Value {
+    val v: opt[*Value] = get(t, path);
+    if (sel v.none)        { ret nil; }
+    if (v.some.tag != tag) { ret nil; }
+    ret v.some;
+}
+
+# find a value by key prefix and length
+# ---
+# t:       table to search
+# seg:     start of the key segment (not null-terminated)
+# seg_len: length of the segment
+# ret:     pointer to the value, or nil
+pub fun find_by_seg(t: *Table, seg: str, seg_len: usize) *Value {
+    if (t.len == 0) { ret nil; }
+    val keys: *str   = t.keys::*str;
+    val vals: *Value = t.values::*Value;
+    var i:    usize  = 0;
+    for (i < t.len) {
+        if (str_len(keys[i]) == seg_len && memory.raw_equal(keys[i]::ptr, seg::ptr, seg_len)) {
+            ret ?vals[i];
+        }
+        i = i + 1;
+    }
+    ret nil;
+}
+
+# look up a string value by dotted path
+# ---
+# t:    root table
+# path: dotted key path
+# ret:  the string value, or none if not found or wrong type
+pub fun get_str(t: *Table, path: str) opt[str] {
+    val v: *Value = get_typed(t, path, TYPE_STRING);
+    if (v == nil) { ret opt[str].none{}; }
+    ret opt[str].some{v.data.string};
+}
+
+# look up an integer value by dotted path
+# ---
+# t:    root table
+# path: dotted key path
+# ret:  the integer value, or none if not found or wrong type
+pub fun get_int(t: *Table, path: str) opt[i64] {
+    val v: *Value = get_typed(t, path, TYPE_INTEGER);
+    if (v == nil) { ret opt[i64].none{}; }
+    ret opt[i64].some{v.data.integer};
+}
+
+# look up a float value by dotted path
+# ---
+# t:    root table
+# path: dotted key path
+# ret:  the float value, or none if not found or wrong type
+pub fun get_float(t: *Table, path: str) opt[f64] {
+    val v: *Value = get_typed(t, path, TYPE_FLOAT);
+    if (v == nil) { ret opt[f64].none{}; }
+    ret opt[f64].some{v.data.float};
+}
+
+# look up a boolean value by dotted path
+# ---
+# t:    root table
+# path: dotted key path
+# ret:  the boolean value, or none if not found or wrong type
+pub fun get_bool(t: *Table, path: str) opt[bool] {
+    val v: *Value = get_typed(t, path, TYPE_BOOL);
+    if (v == nil) { ret opt[bool].none{}; }
+    ret opt[bool].some{v.data.boolean};
+}
+
+# look up a sub-table by dotted path
+# ---
+# t:    root table
+# path: dotted key path
+# ret:  the sub-table, or none if not found or wrong type
+pub fun get_table(t: *Table, path: str) opt[*Table] {
+    val v: *Value = get_typed(t, path, TYPE_TABLE);
+    if (v == nil) { ret opt[*Table].none{}; }
+    ret opt[*Table].some{?v.data.table};
+}
+
+# look up an array by dotted path
+# ---
+# t:    root table
+# path: dotted key path
+# ret:  the array, or none if not found or wrong type
+pub fun get_array(t: *Table, path: str) opt[*Array] {
+    val v: *Value = get_typed(t, path, TYPE_ARRAY);
+    if (v == nil) { ret opt[*Array].none{}; }
+    ret opt[*Array].some{?v.data.array};
+}
+
+# get a value from an array by index
+# ---
+# arr:   array to index
+# index: element index
+# ret:   the element, or none past the last element
+pub fun array_get(arr: *Array, index: usize) opt[*Value] {
+    if (index >= arr.len) { ret opt[*Value].none{}; }
+    val items: *Value = arr.items::*Value;
+    ret opt[*Value].some{?items[index]};
+}
+
+# get the number of entries in a table
+# ---
+# t:   table to query
+# ret: number of key-value pairs
+pub fun table_len(t: *Table) usize {
+    ret t.len;
+}
+
+# get a key by positional index
+# ---
+# t:     table to query
+# index: position (0-based)
+# ret:   the key, or none past the last entry
+pub fun table_key(t: *Table, index: usize) opt[str] {
+    if (index >= t.len) { ret opt[str].none{}; }
+    val keys: *str = t.keys::*str;
+    ret opt[str].some{keys[index]};
+}
+
+# get a value by positional index
+# ---
+# t:     table to query
+# index: position (0-based)
+# ret:   the value, or none past the last entry
+pub fun table_value(t: *Table, index: usize) opt[*Value] {
+    if (index >= t.len) { ret opt[*Value].none{}; }
+    val vals: *Value = t.values::*Value;
+    ret opt[*Value].some{?vals[index]};
+}
+
+# get the number of elements in an array
+# ---
+# arr: array to query
+# ret: number of elements
+pub fun array_len(arr: *Array) usize {
+    ret arr.len;
+}
