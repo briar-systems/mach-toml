@@ -1,0 +1,114 @@
+# encoding a string as the body of a TOML basic string
+
+use std.allocator.Allocator;
+use std.allocator.Error;
+use std.allocator.allocate;
+use std.system.capability;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+
+$if (capability.HOSTED) {
+    use std.allocator.page;
+    use std_format: std.format;
+    use std.types.option.opt;
+    use std.types.string.str_equals;
+    use toml.error.TomlError;
+    use toml.lookup.get_str;
+    use toml.parse.parse;
+    use toml.value.Table;
+}
+
+# the body of a TOML basic string holding `s`: backslash, quote and control
+# bytes escaped so the text parses back to the same value
+# ---
+# a:   owns the returned text
+# s:   the value
+# ret: the escaped body, without the surrounding quotes; overflow when its
+#      length cannot be represented, or the allocator's refusal
+pub fun escape(a: *Allocator, s: str) res[str, Error] {
+    val n:   usize = str_len(s);
+    var cap: usize = 1;
+    var i:   usize = 0;
+    for (i < n) {
+        val width: usize = escaped_width(s[i]);
+        if (cap > 0xffffffffffffffff::usize - width) { ret res[str, Error].err{Error.overflow{}}; }
+        cap = cap + width;
+        i   = i + 1;
+    }
+    val r: res[*u8, Error] = allocate[u8](a, cap);
+    if (sel r.err) { ret res[str, Error].err{r.err}; }
+    val buf: *u8   = r.ok;
+    var k:   usize = 0;
+    i = 0;
+    for (i < n) {
+        k = escaped_put(buf, k, s[i]);
+        i = i + 1;
+    }
+    buf[k] = 0;
+    ret res[str, Error].ok{buf::str};
+}
+
+# the short escape letter of `c` in a basic string, 0 when it has none
+fun escape_letter(c: u8) u8 {
+    if (c == '\\') { ret '\\'; }
+    if (c == '"')  { ret '"'; }
+    if (c == '\n') { ret 'n'; }
+    if (c == '\r') { ret 'r'; }
+    if (c == '\t') { ret 't'; }
+    if (c == 8)    { ret 'b'; }
+    if (c == 12)   { ret 'f'; }
+    ret 0;
+}
+
+# how many bytes `c` takes in a basic string's body
+fun escaped_width(c: u8) usize {
+    if (escape_letter(c) != 0) { ret 2; }
+    if (c < 32 || c == 127)    { ret 6; }
+    ret 1;
+}
+
+# write `c` as a basic string's body spells it at buf[k], returning the
+# offset past it
+fun escaped_put(buf: *u8, k: usize, c: u8) usize {
+    val letter: u8 = escape_letter(c);
+    if (letter != 0) {
+        buf[k]     = '\\';
+        buf[k + 1] = letter;
+        ret k + 2;
+    }
+    if (c < 32 || c == 127) {
+        val digits: str = "0123456789abcdef";
+        buf[k]     = '\\';
+        buf[k + 1] = 'u';
+        buf[k + 2] = '0';
+        buf[k + 3] = '0';
+        buf[k + 4] = digits[(c >> 4)::usize];
+        buf[k + 5] = digits[(c & 15)::usize];
+        ret k + 6;
+    }
+    buf[k] = c;
+    ret k + 1;
+}
+
+$if (capability.HOSTED) {
+    # an escaped value parses back to the value it escaped
+    test toml__escape_parses_back {
+        var a: Allocator;
+        page.make(?a);
+        val value: str             = "q\"b\\n\nt\tc\x01d\x7f";
+        val e:     res[str, Error] = escape(?a, value);
+        if (sel e.err)                                               { ret 1; }
+        if (!str_equals(e.ok, "q\\\"b\\\\n\\nt\\tc\\u0001d\\u007f")) { ret 2; }
+        val doc: res[str, std_format.FormatError] = std_format.sprint(?a, "v = \"{}\"\n", e.ok);
+        if (sel doc.err) { ret 3; }
+        val r: res[Table, TomlError] = parse(?a, doc.ok);
+        if (sel r.err) { ret 4; }
+        var t:   Table    = r.ok;
+        val got: opt[str] = get_str(?t, "v");
+        if (!sel got.some)                { ret 5; }
+        if (!str_equals(got.some, value)) { ret 6; }
+        ret 0;
+    }
+}
