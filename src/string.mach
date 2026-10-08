@@ -1,0 +1,357 @@
+# string literals: scanning, escape decoding and their storage
+
+use std.allocator.Allocator;
+use std.allocator.Error;
+use std.allocator.allocate;
+use std.allocator.deallocate;
+use std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use toml.error.TomlError;
+use toml.scan.hex_digit;
+use toml.scan.is_ws_or_newline;
+
+# allocate a copy of a substring
+# ---
+# a:     allocator
+# src:   source string
+# start: byte offset into src
+# len:   number of bytes to copy
+# ret:   null-terminated copy, or the allocator's refusal
+pub fun alloc_str(a: *Allocator, src: str, start: usize, len: usize) res[str, Error] {
+    val r: res[*u8, Error] = allocate[u8](a, len + 1);
+    if (sel r.err) { ret res[str, Error].err{r.err}; }
+    val buf: *u8 = r.ok;
+    memory.raw_copy(buf::ptr, (src::usize + start)::ptr, len);
+    buf[len] = 0;
+    ret res[str, Error].ok{buf::*u8};
+}
+
+pub fun text_fail(e: TomlError) res[str, TomlError] {
+    ret res[str, TomlError].err{e};
+}
+
+pub fun text_alloc(e: Error) res[str, TomlError] {
+    ret res[str, TomlError].err{TomlError.alloc{e}};
+}
+
+# write an escape sequence into buf starting at di
+# advances si past the escape. returns 0 on invalid escape, otherwise
+# the number of bytes written (1 for simple escapes, 1-4 for unicode).
+fun decode_escape(src: str, si: *usize, buf: *u8, di: usize) usize {
+    val e: u8 = src[@si];
+
+    if (e == 'n') {
+        buf[di] = '\n';
+        @si     = @si + 1;
+        ret 1;
+    }
+    if (e == 't') {
+        buf[di] = '\t';
+        @si     = @si + 1;
+        ret 1;
+    }
+    if (e == 'r') {
+        buf[di] = '\r';
+        @si     = @si + 1;
+        ret 1;
+    }
+    if (e == '"') {
+        buf[di] = '"';
+        @si     = @si + 1;
+        ret 1;
+    }
+    if (e == '\\') {
+        buf[di] = '\\';
+        @si     = @si + 1;
+        ret 1;
+    }
+    if (e == 'b') {
+        buf[di] = 8;
+        @si     = @si + 1;
+        ret 1;
+    }
+    if (e == 'f') {
+        buf[di] = 12;
+        @si     = @si + 1;
+        ret 1;
+    }
+
+    if (e == 'u' || e == 'U') {
+        var ndig: usize = 4;
+        if (e == 'U') { ndig = 8; }
+
+        var code: u32   = 0;
+        var k:    usize = 0;
+        for (k < ndig) {
+            val d: i32 = hex_digit(src[@si + 1 + k]);
+            if (d < 0) { ret 0; }
+            code = (code << 4) | d::u32;
+            k    = k + 1;
+        }
+
+        if (code >= 0xD800 && code <= 0xDFFF) { ret 0; }
+
+        @si = @si + ndig + 1;
+        ret encode_utf8(buf, di, code);
+    }
+
+    ret 0;
+}
+
+# whether the escape whose letter is at src[at] is a `\u` or `\U` escape of
+# the NUL code point
+fun escape_is_nul(src: str, at: usize) bool {
+    var ndig: usize = 4;
+    if (src[at] == 'U') { ndig = 8; }
+    or (src[at] != 'u') { ret false; }
+    var k: usize = 1;
+    for (k <= ndig) {
+        if (src[at + k] != '0') { ret false; }
+        k = k + 1;
+    }
+    ret true;
+}
+
+# count output bytes for an escape at src[@i]
+# advances i past the escape sequence.
+fun count_escape_len(src: str, i: *usize) usize {
+    val e: u8 = src[@i];
+    if (e == 'u' || e == 'U') {
+        var ndig: usize = 4;
+        if (e == 'U') { ndig = 8; }
+        var code: u32   = 0;
+        var k:    usize = 0;
+        for (k < ndig) {
+            val d: i32 = hex_digit(src[@i + 1 + k]);
+            if (d >= 0) { code = (code << 4) | d::u32; }
+            k = k + 1;
+        }
+        @i = @i + ndig + 1;
+        ret utf8_len(code);
+    }
+    @i = @i + 1;
+    ret 1;
+}
+
+# return the number of bytes needed to encode a codepoint as UTF-8
+fun utf8_len(code: u32) usize {
+    if (code <= 0x7F)   { ret 1; }
+    if (code <= 0x7FF)  { ret 2; }
+    if (code <= 0xFFFF) { ret 3; }
+    ret 4;
+}
+
+# write a unicode codepoint as UTF-8 into buf at offset di
+# returns the number of bytes written (1-4).
+fun encode_utf8(buf: *u8, di: usize, code: u32) usize {
+    if (code <= 0x7F) {
+        buf[di] = code::u8;
+        ret 1;
+    }
+    if (code <= 0x7FF) {
+        buf[di]     = (0xC0 | (code >> 6))::u8;
+        buf[di + 1] = (0x80 | (code & 0x3F))::u8;
+        ret 2;
+    }
+    if (code <= 0xFFFF) {
+        buf[di]     = (0xE0 | (code >> 12))::u8;
+        buf[di + 1] = (0x80 | ((code >> 6) & 0x3F))::u8;
+        buf[di + 2] = (0x80 | (code & 0x3F))::u8;
+        ret 3;
+    }
+    buf[di]     = (0xF0 | (code >> 18))::u8;
+    buf[di + 1] = (0x80 | ((code >> 12) & 0x3F))::u8;
+    buf[di + 2] = (0x80 | ((code >> 6) & 0x3F))::u8;
+    buf[di + 3] = (0x80 | (code & 0x3F))::u8;
+    ret 4;
+}
+
+# parse a double-quoted string with escape processing
+# expects the cursor on the opening '"'.
+# ---
+# a:   allocator for the output buffer
+# src: source text
+# i:   cursor position (updated past closing '"')
+# ret: the parsed string, or the failure
+pub fun parse_basic_string(a: *Allocator, src: str, i: *usize) res[str, TomlError] {
+    @i = @i + 1;
+
+    if (src[@i] == '"' && src[@i + 1] == '"') {
+        @i = @i + 2;
+        ret parse_ml_basic_string(a, src, i);
+    }
+
+    val start: usize = @i;
+
+    # pass 1: compute output length
+    var out_len: usize = 0;
+    for {
+        val b: u8 = src[@i];
+        if (b == 0 || b == '\n') { ret text_fail(TomlError.syntax{@i}); }
+        if (b == '"')            { brk; }
+        if (b == '\\') {
+            @i = @i + 1;
+            if (src[@i] == 0)           { ret text_fail(TomlError.syntax{@i}); }
+            if (escape_is_nul(src, @i)) { ret text_fail(TomlError.nul{@i - 1}); }
+            out_len = out_len + count_escape_len(src, i);
+            cnt;
+        }
+        out_len = out_len + 1;
+        @i      = @i + 1;
+    }
+
+    val r: res[*u8, Error] = allocate[u8](a, out_len + 1);
+    if (sel r.err) { ret text_alloc(r.err); }
+    val buf: *u8 = r.ok;
+
+    # pass 2: copy with escape processing
+    var si: usize = start;
+    var di: usize = 0;
+    for {
+        if (src[si] == '"') { brk; }
+        if (src[si] == '\\') {
+            si = si + 1;
+            val esc_at:  usize = si;
+            val esc_len: usize = decode_escape(src, ?si, buf, di);
+            if (esc_len == 0) {
+                deallocate[u8](a, buf, out_len + 1);
+                ret text_fail(TomlError.syntax{esc_at});
+            }
+            di = di + esc_len;
+            cnt;
+        }
+        buf[di] = src[si];
+        di      = di + 1;
+        si      = si + 1;
+    }
+
+    buf[out_len] = 0;
+    @i           = @i + 1;
+    ret res[str, TomlError].ok{buf::*u8};
+}
+
+# parse a triple-quoted basic string
+# expects the cursor immediately after the opening """.
+# ---
+# a:   allocator
+# src: source text
+# i:   cursor position
+# ret: the parsed string, or the failure
+fun parse_ml_basic_string(a: *Allocator, src: str, i: *usize) res[str, TomlError] {
+    # skip immediate newline after opening """
+    if (src[@i] == '\n')                        { @i = @i + 1; }
+    or (src[@i] == '\r' && src[@i + 1] == '\n') { @i = @i + 2; }
+
+    val start:   usize = @i;
+    var out_len: usize = 0;
+
+    # pass 1: compute output length
+    for {
+        if (src[@i] == 0)                                               { ret text_fail(TomlError.syntax{@i}); }
+        if (src[@i] == '"' && src[@i + 1] == '"' && src[@i + 2] == '"') { brk; }
+        if (src[@i] == '\\') {
+            @i = @i + 1;
+            # line-ending backslash: skip trailing whitespace
+            if (is_ws_or_newline(src[@i])) {
+                for (is_ws_or_newline(src[@i])) { @i = @i + 1; }
+                cnt;
+            }
+            if (escape_is_nul(src, @i)) { ret text_fail(TomlError.nul{@i - 1}); }
+            out_len = out_len + count_escape_len(src, i);
+            cnt;
+        }
+        out_len = out_len + 1;
+        @i      = @i + 1;
+    }
+
+    val r: res[*u8, Error] = allocate[u8](a, out_len + 1);
+    if (sel r.err) { ret text_alloc(r.err); }
+    val buf: *u8 = r.ok;
+
+    # pass 2: copy with escape processing
+    var si: usize = start;
+    var di: usize = 0;
+    for {
+        if (src[si] == '"' && src[si + 1] == '"' && src[si + 2] == '"') { brk; }
+        if (src[si] == '\\') {
+            si = si + 1;
+            if (is_ws_or_newline(src[si])) {
+                for (is_ws_or_newline(src[si])) { si = si + 1; }
+                cnt;
+            }
+            val esc_at:  usize = si;
+            val esc_len: usize = decode_escape(src, ?si, buf, di);
+            if (esc_len == 0) {
+                deallocate[u8](a, buf, out_len + 1);
+                ret text_fail(TomlError.syntax{esc_at});
+            }
+            di = di + esc_len;
+            cnt;
+        }
+        buf[di] = src[si];
+        di      = di + 1;
+        si      = si + 1;
+    }
+
+    buf[out_len] = 0;
+    @i           = @i + 3;
+    ret res[str, TomlError].ok{buf::*u8};
+}
+
+# parse a single-quoted string (no escapes)
+# expects the cursor on the opening "'".
+# ---
+# a:   allocator
+# src: source text
+# i:   cursor position
+# ret: the parsed string, or the failure
+pub fun parse_literal_string(a: *Allocator, src: str, i: *usize) res[str, TomlError] {
+    @i = @i + 1;
+
+    if (src[@i] == '\'' && src[@i + 1] == '\'') {
+        @i = @i + 2;
+        ret parse_ml_literal_string(a, src, i);
+    }
+
+    val start: usize = @i;
+    for (src[@i] != 0 && src[@i] != '\'' && src[@i] != '\n') {
+        @i = @i + 1;
+    }
+    if (src[@i] != '\'') { ret text_fail(TomlError.syntax{@i}); }
+
+    val len: usize = @i - start;
+    @i = @i + 1;
+    val copied: res[str, Error] = alloc_str(a, src, start, len);
+    if (sel copied.err) { ret text_alloc(copied.err); }
+    ret res[str, TomlError].ok{copied.ok};
+}
+
+# parse a triple-quoted literal string
+# expects the cursor immediately after the opening '''.
+# ---
+# a:   allocator
+# src: source text
+# i:   cursor position
+# ret: the parsed string, or the failure
+fun parse_ml_literal_string(a: *Allocator, src: str, i: *usize) res[str, TomlError] {
+    if (src[@i] == '\n')                        { @i = @i + 1; }
+    or (src[@i] == '\r' && src[@i + 1] == '\n') { @i = @i + 2; }
+
+    val start: usize = @i;
+    for {
+        if (src[@i] == 0)                                                  { ret text_fail(TomlError.syntax{@i}); }
+        if (src[@i] == '\'' && src[@i + 1] == '\'' && src[@i + 2] == '\'') { brk; }
+        @i = @i + 1;
+    }
+
+    val len: usize = @i - start;
+    @i = @i + 3;
+    val copied: res[str, Error] = alloc_str(a, src, start, len);
+    if (sel copied.err) { ret text_alloc(copied.err); }
+    ret res[str, TomlError].ok{copied.ok};
+}
