@@ -23,6 +23,7 @@ fwd toml.value.Span;
 fwd toml.value.Value;
 fwd toml.value.Array;
 fwd toml.value.Table;
+fwd toml.tree.dnit;
 fwd toml.lookup.get;
 fwd toml.lookup.get_str;
 fwd toml.lookup.get_int;
@@ -48,7 +49,6 @@ use std.types.error.err;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.string.str_equals;
 use std.types.string.str_len;
 use toml.error.at;
 use toml.lookup.table_find;
@@ -63,6 +63,16 @@ use toml.string.parse_basic_string;
 use toml.string.parse_literal_string;
 use toml.string.text_alloc;
 use toml.string.text_fail;
+use toml.tree.KeySegs;
+use toml.tree.array_dnit;
+use toml.tree.array_push;
+use toml.tree.free_str;
+use toml.tree.keysegs_dnit;
+use toml.tree.keysegs_make;
+use toml.tree.keysegs_push;
+use toml.tree.table_ensure_subtable;
+use toml.tree.table_set;
+use toml.tree.value_dnit;
 use toml.value.array_make;
 use toml.value.span_from;
 use toml.value.table_make;
@@ -79,333 +89,8 @@ $if (capability.HOSTED) {
     use std_format: std.format;
     use std.types.bool.bool;
     use std.types.option.opt;
+    use std.types.string.str_equals;
     use toml.lookup.find_by_seg;
-}
-
-val VALUE_SIZE: usize = $size_of(Value);
-val SPAN_SIZE:  usize = $size_of(Span);
-
-# key path segments for dotted key navigation
-rec KeySegs {
-    segs:  *str;
-    spans: *Span;
-    len:   usize;
-    cap:   usize;
-}
-
-# keep the first refusal a release walk meets
-fun keep_first(first: *err[Error], next: err[Error]) {
-    if (sel next.err) {
-        if (sel first.ok) { @first = next; }
-    }
-}
-
-# release a string this module allocated with `alloc_str`
-#
-# `alloc_str` reserves `len + 1` bytes and null-terminates, so the length the
-# free needs is recoverable from the string itself. Written here rather than
-# reached for from `std.text.string` because the allocation is `u8`-typed and the
-# pairing must be visible beside the code that made it.
-# ---
-# a: allocator the string was allocated from
-# s: string to release; nil is a no-op
-fun free_str(a: *Allocator, s: str) err[Error] {
-    if (s == nil) { ret err[Error].ok{}; }
-    ret deallocate[u8](a, s::*u8, str_len(s) + 1);
-}
-
-# release everything a value owns, leaving the value itself untouched
-#
-# Only the three payload-bearing tags own storage. The scalars carry their value
-# inline and have nothing to release, which is why this is a dispatch rather than
-# a table.
-# ---
-# a: allocator the value was parsed with
-# v: value whose payload to release
-fun value_dnit(a: *Allocator, v: *Value) err[Error] {
-    if (v.tag == TYPE_STRING) { ret free_str(a, v.data.string); }
-    if (v.tag == TYPE_TABLE)  { ret dnit(a, ?v.data.table); }
-    if (v.tag == TYPE_ARRAY)  { ret array_dnit(a, ?v.data.array); }
-    ret err[Error].ok{};
-}
-
-# release an array's elements and its backing storage
-# ---
-# a:   allocator the array was parsed with
-# arr: array to tear down; reset to empty
-fun array_dnit(a: *Allocator, arr: *Array) err[Error] {
-    var first: err[Error] = err[Error].ok{};
-    val items: *Value     = arr.items::*Value;
-    var i:     usize      = 0;
-    for (i < arr.len) {
-        keep_first(?first, value_dnit(a, ?items[i]));
-        i = i + 1;
-    }
-    if (arr.items != nil && arr.cap > 0) {
-        keep_first(?first, deallocate[u8](a, arr.items::*u8, arr.cap * VALUE_SIZE));
-    }
-    arr.items = nil;
-    arr.len   = 0;
-    arr.cap   = 0;
-    ret first;
-}
-
-# release a key-segment list: every segment string, then the segment array
-#
-# A segment is never adopted by a table - `table_set` stores its own copy - so
-# the list owns every segment it parsed and frees all of them, whether or not the
-# key they spell was already present.
-# ---
-# a:  allocator the segments were parsed with
-# ks: segment list to tear down; reset to empty
-fun keysegs_dnit(a: *Allocator, ks: *KeySegs) err[Error] {
-    var first: err[Error] = err[Error].ok{};
-    var i:     usize      = 0;
-    for (i < ks.len) {
-        keep_first(?first, free_str(a, ks.segs[i]));
-        i = i + 1;
-    }
-    if (ks.segs != nil && ks.cap > 0) {
-        keep_first(?first, deallocate[u8](a, ks.segs::*u8, ks.cap * 8));
-        keep_first(?first, deallocate[u8](a, ks.spans::*u8, ks.cap * SPAN_SIZE));
-    }
-    ks.segs  = nil;
-    ks.spans = nil;
-    ks.len   = 0;
-    ks.cap   = 0;
-    ret first;
-}
-
-# release a parsed table and everything under it
-#
-# The teardown `parse` has always needed and never had. A `Table` owns its key
-# copies, its value payloads, and its two parallel arrays, all from the allocator
-# `parse` was handed, so one recursive walk returns the whole tree. Callers that
-# outlive a single parse - anything holding a Session across reloads - must call
-# this or the parse is a permanent allocation.
-#
-# The table is reset to the empty state rather than left dangling, so a
-# double-dnit is a no-op rather than a double free. every buffer is released
-# even when one refusal is reported; the first refusal is the outcome.
-# ---
-# a:   allocator the table was parsed with
-# t:   table to tear down
-# ret: ok, or the first refusal the allocator reported
-pub fun dnit(a: *Allocator, t: *Table) err[Error] {
-    var first: err[Error] = err[Error].ok{};
-    val keys:  *str       = t.keys::*str;
-    val vals:  *Value     = t.values::*Value;
-    var i:     usize      = 0;
-    for (i < t.len) {
-        keep_first(?first, free_str(a, keys[i]));
-        keep_first(?first, value_dnit(a, ?vals[i]));
-        i = i + 1;
-    }
-    if (t.keys != nil && t.cap > 0) {
-        keep_first(?first, deallocate[u8](a, t.keys::*u8, t.cap * 8));
-    }
-    if (t.values != nil && t.cap > 0) {
-        keep_first(?first, deallocate[u8](a, t.values::*u8, t.cap * VALUE_SIZE));
-    }
-    t.keys   = nil;
-    t.values = nil;
-    t.len    = 0;
-    t.cap    = 0;
-    ret first;
-}
-
-# insert or overwrite a key-value pair in a table
-#
-# a refused acquisition leaves the table exactly as it was and the value the
-# caller's; a growth refused part way releases the buffer it acquired first.
-# ---
-# a:    allocator for growth
-# t:    target table
-# key:  key string
-# val_: value to store
-# ret:  ok, or the allocator's refusal
-fun table_set(a: *Allocator, t: *Table, key: str, val_: Value) err[Error] {
-    # overwrite existing key: the table keeps the key copy it already owns and
-    # releases the value being displaced, so a re-set never strands the old one
-    val keys: *str   = t.keys::*str;
-    val vals: *Value = t.values::*Value;
-    var i:    usize  = 0;
-    for (i < t.len) {
-        if (str_equals(keys[i], key)) {
-            value_dnit(a, ?vals[i]);
-            vals[i] = val_;
-            ret err[Error].ok{};
-        }
-        i = i + 1;
-    }
-
-    # the table owns its keys, so it stores a copy rather than adopting the
-    # caller's string. one rule for every insert path: the caller frees what it
-    # passed, whether or not the key was already present
-    val kd: res[str, Error] = alloc_str(a, key, 0, str_len(key));
-    if (sel kd.err) { ret err[Error].err{kd.err}; }
-    val owned_key: str = kd.ok;
-
-    # grow parallel arrays if at capacity
-    if (t.len >= t.cap) {
-        var new_cap: usize = t.cap * 2;
-        if (t.cap == 0) { new_cap = 8; }
-        or (new_cap < t.cap) {
-            free_str(a, owned_key);
-            ret err[Error].err{Error.overflow{}};
-        }
-
-        val kr: res[*u8, Error] = allocate[u8](a, new_cap * 8);
-        if (sel kr.err) {
-            free_str(a, owned_key);
-            ret err[Error].err{kr.err};
-        }
-        val new_keys: *str = kr.ok::*str;
-
-        val vr: res[*u8, Error] = allocate[u8](a, new_cap * VALUE_SIZE);
-        if (sel vr.err) {
-            deallocate[u8](a, new_keys::*u8, new_cap * 8);
-            free_str(a, owned_key);
-            ret err[Error].err{vr.err};
-        }
-        val new_vals: *Value = vr.ok::*Value;
-
-        if (t.len > 0) {
-            memory.raw_copy(new_keys::ptr, t.keys, t.len * 8);
-            memory.raw_copy(new_vals::ptr, t.values, t.len * VALUE_SIZE);
-        }
-        if (t.keys != nil && t.cap > 0) {
-            deallocate[u8](a, t.keys::*u8, t.cap * 8);
-        }
-        if (t.values != nil && t.cap > 0) {
-            deallocate[u8](a, t.values::*u8, t.cap * VALUE_SIZE);
-        }
-
-        t.keys   = new_keys::ptr;
-        t.values = new_vals::ptr;
-        t.cap    = new_cap;
-    }
-
-    val keys2: *str   = t.keys::*str;
-    val vals2: *Value = t.values::*Value;
-    keys2[t.len] = owned_key;
-    vals2[t.len] = val_;
-    t.len        = t.len + 1;
-    ret err[Error].ok{};
-}
-
-# find or create a sub-table under a key
-#
-# a conflict is reported without a position; the caller that knows the key's
-# offset places it with `at`.
-# ---
-# a:   allocator for new table storage
-# t:   parent table
-# key: key for the sub-table
-# tok: the key token creating it, recorded as its span and key when it is new
-# ret: the table-typed value, or the failure
-fun table_ensure_subtable(a: *Allocator, t: *Table, key: str, tok: Span) res[*Value, TomlError] {
-    val existing: *Value = table_find(t, key);
-    if (existing != nil) {
-        if (existing.tag != TYPE_TABLE) {
-            ret res[*Value, TomlError].err{TomlError.conflict{0}};
-        }
-        ret res[*Value, TomlError].ok{existing};
-    }
-
-    var empty: Value = value_table(table_make());
-    empty.span = tok;
-    empty.key  = tok;
-    val sr: err[Error] = table_set(a, t, key, empty);
-    if (sel sr.err) { ret res[*Value, TomlError].err{TomlError.alloc{sr.err}}; }
-    ret res[*Value, TomlError].ok{table_find(t, key)};
-}
-
-# append a value to an array
-#
-# a refused growth leaves the array as it was and the value the caller's.
-# ---
-# a:    allocator for growth
-# arr:  target array
-# val_: value to append
-# ret:  ok, or the allocator's refusal
-fun array_push(a: *Allocator, arr: *Array, val_: Value) err[Error] {
-    if (arr.len >= arr.cap) {
-        var new_cap: usize = arr.cap * 2;
-        if (arr.cap == 0)      { new_cap = 4; }
-        or (new_cap < arr.cap) { ret err[Error].err{Error.overflow{}}; }
-
-        val r: res[*u8, Error] = allocate[u8](a, new_cap * VALUE_SIZE);
-        if (sel r.err) { ret err[Error].err{r.err}; }
-        val new_items: *Value = r.ok::*Value;
-
-        if (arr.len > 0) {
-            memory.raw_copy(new_items::ptr, arr.items, arr.len * VALUE_SIZE);
-        }
-        if (arr.items != nil && arr.cap > 0) {
-            deallocate[u8](a, arr.items::*u8, arr.cap * VALUE_SIZE);
-        }
-
-        arr.items = new_items::ptr;
-        arr.cap   = new_cap;
-    }
-
-    val items: *Value = arr.items::*Value;
-    items[arr.len] = val_;
-    arr.len        = arr.len + 1;
-    ret err[Error].ok{};
-}
-
-# create an empty key segment list
-fun keysegs_make() KeySegs {
-    var ks: KeySegs;
-    ks.segs  = nil;
-    ks.spans = nil;
-    ks.len   = 0;
-    ks.cap   = 0;
-    ret ks;
-}
-
-# append a segment to a key path
-# ---
-# a:    allocator for growth
-# ks:   target key segments
-# seg:  segment string to append
-# span: the segment token as written
-# ret:  ok, or the allocator's refusal; the segment stays the caller's
-fun keysegs_push(a: *Allocator, ks: *KeySegs, seg: str, span: Span) err[Error] {
-    if (ks.len >= ks.cap) {
-        var new_cap: usize = ks.cap * 2;
-        if (ks.cap == 0)      { new_cap = 4; }
-        or (new_cap < ks.cap) { ret err[Error].err{Error.overflow{}}; }
-
-        val r: res[*u8, Error] = allocate[u8](a, new_cap * 8);
-        if (sel r.err) { ret err[Error].err{r.err}; }
-        val new_segs: *str = r.ok::*str;
-
-        val sr: res[*u8, Error] = allocate[u8](a, new_cap * SPAN_SIZE);
-        if (sel sr.err) {
-            deallocate[u8](a, new_segs::*u8, new_cap * 8);
-            ret err[Error].err{sr.err};
-        }
-        val new_spans: *Span = sr.ok::*Span;
-
-        if (ks.len > 0) {
-            memory.raw_copy(new_segs::ptr, ks.segs::ptr, ks.len * 8);
-            memory.raw_copy(new_spans::ptr, ks.spans::ptr, ks.len * SPAN_SIZE);
-        }
-        if (ks.segs != nil && ks.cap > 0) {
-            deallocate[u8](a, ks.segs::*u8, ks.cap * 8);
-            deallocate[u8](a, ks.spans::*u8, ks.cap * SPAN_SIZE);
-        }
-        ks.segs  = new_segs;
-        ks.spans = new_spans;
-        ks.cap   = new_cap;
-    }
-    ks.segs[ks.len]  = seg;
-    ks.spans[ks.len] = span;
-    ks.len           = ks.len + 1;
-    ret err[Error].ok{};
 }
 
 # parse "true" or "false"
