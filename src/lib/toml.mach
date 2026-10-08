@@ -51,25 +51,21 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_len;
 use toml.error.at;
+use toml.key.navigate_segs;
+use toml.key.parse_key_path;
 use toml.lookup.table_find;
 use toml.number.parse_number;
-use toml.scan.is_bare_key_char;
 use toml.scan.is_value_term;
 use toml.scan.skip_to_newline;
 use toml.scan.skip_ws;
 use toml.scan.skip_ws_comments_newlines;
-use toml.string.alloc_str;
 use toml.string.parse_basic_string;
 use toml.string.parse_literal_string;
-use toml.string.text_alloc;
-use toml.string.text_fail;
 use toml.tree.KeySegs;
 use toml.tree.array_dnit;
 use toml.tree.array_push;
-use toml.tree.free_str;
 use toml.tree.keysegs_dnit;
 use toml.tree.keysegs_make;
-use toml.tree.keysegs_push;
 use toml.tree.table_ensure_subtable;
 use toml.tree.table_set;
 use toml.tree.value_dnit;
@@ -106,88 +102,6 @@ fun parse_bool_val(src: str, i: *usize) res[Value, TomlError] {
         ret value_ok(value_bool(false));
     }
     ret value_fail(TomlError.syntax{@i});
-}
-
-# parse a single key segment (bare, quoted, or literal)
-# ---
-# a:   allocator
-# src: source text
-# i:   cursor position
-# ret: the key string, or the failure
-fun parse_key_segment(a: *Allocator, src: str, i: *usize) res[str, TomlError] {
-    if (src[@i] == '"') {
-        ret parse_basic_string(a, src, i);
-    }
-    if (src[@i] == '\'') {
-        ret parse_literal_string(a, src, i);
-    }
-
-    val start: usize = @i;
-    for (is_bare_key_char(src[@i])) {
-        @i = @i + 1;
-    }
-    if (@i == start) { ret text_fail(TomlError.syntax{@i}); }
-    val copied: res[str, Error] = alloc_str(a, src, start, @i - start);
-    if (sel copied.err) { ret text_alloc(copied.err); }
-    ret res[str, TomlError].ok{copied.ok};
-}
-
-# parse a possibly-dotted key into segments
-#
-# handles bare keys, quoted keys, and mixed dotted keys like a."b".c.
-# each segment is stored independently, preserving literal dots in
-# quoted keys. the caller owns `ks` and releases it however this returns, so
-# a segment parsed before a failure is never stranded.
-# ---
-# a:   allocator
-# src: source text
-# i:   cursor position
-# ks:  the segment list to fill, empty on entry
-# ret: ok, or the failure
-fun parse_key_path(a: *Allocator, src: str, i: *usize, ks: *KeySegs) err[TomlError] {
-    val first_at: usize               = @i;
-    val first:    res[str, TomlError] = parse_key_segment(a, src, i);
-    if (sel first.err) { ret err[TomlError].err{first.err}; }
-
-    val pr: err[Error] = keysegs_push(a, ks, first.ok, span_from(first_at, @i));
-    if (sel pr.err) {
-        free_str(a, first.ok);
-        ret err[TomlError].err{TomlError.alloc{pr.err}};
-    }
-
-    for (src[@i] == '.') {
-        @i = @i + 1;
-        val seg_at: usize               = @i;
-        val seg:    res[str, TomlError] = parse_key_segment(a, src, i);
-        if (sel seg.err) { ret err[TomlError].err{seg.err}; }
-
-        val pr2: err[Error] = keysegs_push(a, ks, seg.ok, span_from(seg_at, @i));
-        if (sel pr2.err) {
-            free_str(a, seg.ok);
-            ret err[TomlError].err{TomlError.alloc{pr2.err}};
-        }
-    }
-
-    ret err[TomlError].ok{};
-}
-
-# walk key segments, creating intermediate tables
-# returns the table that should receive the final segment's value.
-# ---
-# a:   allocator for new tables
-# t:   starting table
-# ks:  key segments (navigates all but the last)
-# ret: target table, or the failure (a conflict unpositioned)
-fun navigate_segs(a: *Allocator, t: *Table, ks: *KeySegs) res[*Table, TomlError] {
-    var current: *Table = t;
-    var i:       usize  = 0;
-    for (i < ks.len - 1) {
-        val tr: res[*Value, TomlError] = table_ensure_subtable(a, current, ks.segs[i], ks.spans[i]);
-        if (sel tr.err) { ret res[*Table, TomlError].err{tr.err}; }
-        current = ?tr.ok.data.table;
-        i       = i + 1;
-    }
-    ret res[*Table, TomlError].ok{current};
 }
 
 # how many containers a value may nest inside before the reader refuses
