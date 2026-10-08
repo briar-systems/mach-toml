@@ -12,7 +12,17 @@
 # the startup a test dispatcher of this library links
 use std.runtime;
 
+fwd toml.value.TYPE_STRING;
+fwd toml.value.TYPE_INTEGER;
+fwd toml.value.TYPE_FLOAT;
+fwd toml.value.TYPE_BOOL;
+fwd toml.value.TYPE_ARRAY;
+fwd toml.value.TYPE_TABLE;
 fwd toml.error.TomlError;
+fwd toml.value.Span;
+fwd toml.value.Value;
+fwd toml.value.Array;
+fwd toml.value.Table;
 
 use std.allocator.Allocator;
 use std.allocator.Error;
@@ -38,6 +48,17 @@ use toml.scan.is_ws_or_newline;
 use toml.scan.skip_to_newline;
 use toml.scan.skip_ws;
 use toml.scan.skip_ws_comments_newlines;
+use toml.value.array_make;
+use toml.value.span_from;
+use toml.value.table_make;
+use toml.value.value_array;
+use toml.value.value_bool;
+use toml.value.value_fail;
+use toml.value.value_float;
+use toml.value.value_int;
+use toml.value.value_ok;
+use toml.value.value_string;
+use toml.value.value_table;
 
 $if (capability.HOSTED) {
     use std.allocator.page;
@@ -45,80 +66,8 @@ $if (capability.HOSTED) {
     use std_format: std.format;
 }
 
-pub val TYPE_STRING:  u8 = 0;
-pub val TYPE_INTEGER: u8 = 1;
-pub val TYPE_FLOAT:   u8 = 2;
-pub val TYPE_BOOL:    u8 = 3;
-pub val TYPE_ARRAY:   u8 = 4;
-pub val TYPE_TABLE:   u8 = 5;
-
 val VALUE_SIZE: usize = $size_of(Value);
 val SPAN_SIZE:  usize = $size_of(Span);
-
-# a byte range of the document handed to `parse`
-# ---
-# at:  offset of the first byte, as `TomlError` positions its failures
-# len: byte count; a span of length 0 at offset 0 means "not parsed"
-pub rec Span {
-    at:  usize;
-    len: usize;
-}
-
-# tagged TOML value
-#
-# a parsed value records where it came from. `span` is the literal as written:
-# the quotes of a string, the brackets of an array or inline table, the whole
-# `[header]` or `[[header]]` line for a table a header defined, or the key token
-# that created a table implicitly (a dotted key's inner segment, a header's
-# inner segment). `key` is the key token that maps to this value in its table,
-# the last segment of a dotted key as written, quotes included. an array
-# element has no key of its own and carries the `[[header]]`'s final segment
-# when a header appended it, else the zero span. a value not produced by
-# `parse` carries the zero span in both.
-# ---
-# tag:  type discriminator (TYPE_*)
-# span: the value's literal in the source
-# key:  the key token that maps to it
-pub rec Value {
-    tag:  u8;
-    span: Span;
-    key:  Span;
-    data: uni {
-        string: str;
-        integer: i64;
-        float: f64;
-        boolean: bool;
-        array: Array;
-        table: Table;
-    };
-}
-
-# ordered list of TOML values
-# ---
-# items: pointer to Value array (ptr to break recursion)
-# len:   number of elements
-# cap:   allocated capacity
-pub rec Array {
-    items: ptr;
-    len:   usize;
-    cap:   usize;
-}
-
-# ordered map of string keys to TOML values
-#
-# a key's source position lives on the value it maps to (`Value.key`), so one
-# `get` answers both where the key and where its value were written.
-# ---
-# keys:   pointer to str array (parallel with values)
-# values: pointer to Value array
-# len:    number of entries
-# cap:    allocated capacity
-pub rec Table {
-    keys:   ptr;
-    values: ptr;
-    len:    usize;
-    cap:    usize;
-}
 
 # key path segments for dotted key navigation
 rec KeySegs {
@@ -249,16 +198,6 @@ pub fun dnit(a: *Allocator, t: *Table) err[Error] {
     ret first;
 }
 
-# create an empty table with nil backing storage
-fun table_make() Table {
-    var t: Table;
-    t.keys   = nil;
-    t.values = nil;
-    t.len    = 0;
-    t.cap    = 0;
-    ret t;
-}
-
 # insert or overwrite a key-value pair in a table
 #
 # a refused acquisition leaves the table exactly as it was and the value the
@@ -385,15 +324,6 @@ fun table_ensure_subtable(a: *Allocator, t: *Table, key: str, tok: Span) res[*Va
     ret res[*Value, TomlError].ok{table_find(t, key)};
 }
 
-# create an empty array with nil backing storage
-fun array_make() Array {
-    var a: Array;
-    a.items = nil;
-    a.len   = 0;
-    a.cap   = 0;
-    ret a;
-}
-
 # append a value to an array
 #
 # a refused growth leaves the array as it was and the value the caller's.
@@ -479,76 +409,6 @@ fun keysegs_push(a: *Allocator, ks: *KeySegs, seg: str, span: Span) err[Error] {
     ks.spans[ks.len] = span;
     ks.len           = ks.len + 1;
     ret err[Error].ok{};
-}
-
-# the zero span: not parsed
-fun span_none() Span {
-    var sp: Span;
-    sp.at  = 0;
-    sp.len = 0;
-    ret sp;
-}
-
-# the bytes from `start` to the cursor
-fun span_from(start: usize, end: usize) Span {
-    var sp: Span;
-    sp.at  = start;
-    sp.len = end - start;
-    ret sp;
-}
-
-fun value_string(s: str) Value {
-    var v: Value;
-    v.tag         = TYPE_STRING;
-    v.span        = span_none();
-    v.key         = span_none();
-    v.data.string = s;
-    ret v;
-}
-
-fun value_int(n: i64) Value {
-    var v: Value;
-    v.tag          = TYPE_INTEGER;
-    v.span         = span_none();
-    v.key          = span_none();
-    v.data.integer = n;
-    ret v;
-}
-
-fun value_float(f: f64) Value {
-    var v: Value;
-    v.tag        = TYPE_FLOAT;
-    v.span       = span_none();
-    v.key        = span_none();
-    v.data.float = f;
-    ret v;
-}
-
-fun value_bool(b: bool) Value {
-    var v: Value;
-    v.tag          = TYPE_BOOL;
-    v.span         = span_none();
-    v.key          = span_none();
-    v.data.boolean = b;
-    ret v;
-}
-
-fun value_table(t: Table) Value {
-    var v: Value;
-    v.tag        = TYPE_TABLE;
-    v.span       = span_none();
-    v.key        = span_none();
-    v.data.table = t;
-    ret v;
-}
-
-fun value_array(a: Array) Value {
-    var v: Value;
-    v.tag        = TYPE_ARRAY;
-    v.span       = span_none();
-    v.key        = span_none();
-    v.data.array = a;
-    ret v;
 }
 
 # look up a value by dotted path in a table
@@ -748,14 +608,6 @@ fun text_fail(e: TomlError) res[str, TomlError] {
 
 fun text_alloc(e: Error) res[str, TomlError] {
     ret res[str, TomlError].err{TomlError.alloc{e}};
-}
-
-fun value_fail(e: TomlError) res[Value, TomlError] {
-    ret res[Value, TomlError].err{e};
-}
-
-fun value_ok(v: Value) res[Value, TomlError] {
-    ret res[Value, TomlError].ok{v};
 }
 
 # write an escape sequence into buf starting at di
