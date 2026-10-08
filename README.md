@@ -5,7 +5,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/briar-systems/mach-toml?color=FF00FF&labelColor=000000" alt="License"></a>
 </p>
 
-**A Mach library for TOML reading and writing.**
+**A Mach library for reading TOML 1.0.**
 
 ## Usage
 
