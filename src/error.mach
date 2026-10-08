@@ -1,0 +1,30 @@
+# the error a parse reports, and the offset it is raised at
+
+use std.allocator.Error;
+use std.types.size.usize;
+
+# every way a parse can fail
+# ---
+# syntax:   the byte at the payload offset is not valid TOML
+# overflow: an integer literal at the payload offset does not fit i64
+# depth:    a value at the payload offset nests deeper than MAX_VALUE_DEPTH
+# conflict: the key at the payload offset collides with an existing value of
+#           another shape (a table where a scalar was set, an array of tables
+#           over a table, and the like)
+# nul:      a NUL byte at the payload offset, written raw or as a `\u0000` or
+#           `\U00000000` escape; a parsed string cannot carry one
+# alloc:    an acquisition was refused; nothing the parse built survives
+pub tag TomlError: u8 {
+    syntax:   usize;
+    overflow: usize;
+    depth:    usize;
+    conflict: usize;
+    nul:      usize;
+    alloc:    Error;
+}
+
+# place an unpositioned conflict at the key it was raised for
+pub fun at(e: TomlError, pos: usize) TomlError {
+    if (sel e.conflict) { ret TomlError.conflict{pos}; }
+    ret e;
+}

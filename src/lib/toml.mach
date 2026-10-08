@@ -11,6 +11,14 @@
 
 # the startup a test dispatcher of this library links
 use std.runtime;
+
+fwd toml.error.TomlError;
+
+use std.allocator.Allocator;
+use std.allocator.Error;
+use std.allocator.allocate;
+use std.allocator.deallocate;
+use std.memory;
 use std.system.capability;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -22,17 +30,13 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
 use std.types.string.str_len;
-
-use std.allocator.Allocator;
-use std.allocator.Error;
-use std.allocator.allocate;
-use std.allocator.deallocate;
+use toml.error.at;
 
 $if (capability.HOSTED) {
     use std.allocator.page;
+    use std.allocator.testing;
+    use std_format: std.format;
 }
-
-use std.memory;
 
 pub val TYPE_STRING:  u8 = 0;
 pub val TYPE_INTEGER: u8 = 1;
@@ -43,26 +47,6 @@ pub val TYPE_TABLE:   u8 = 5;
 
 val VALUE_SIZE: usize = $size_of(Value);
 val SPAN_SIZE:  usize = $size_of(Span);
-
-# every way a parse can fail
-# ---
-# syntax:   the byte at the payload offset is not valid TOML
-# overflow: an integer literal at the payload offset does not fit i64
-# depth:    a value at the payload offset nests deeper than MAX_VALUE_DEPTH
-# conflict: the key at the payload offset collides with an existing value of
-#           another shape (a table where a scalar was set, an array of tables
-#           over a table, and the like)
-# nul:      a NUL byte at the payload offset, written raw or as a `\u0000` or
-#           `\U00000000` escape; a parsed string cannot carry one
-# alloc:    an acquisition was refused; nothing the parse built survives
-pub tag TomlError: u8 {
-    syntax:   usize;
-    overflow: usize;
-    depth:    usize;
-    conflict: usize;
-    nul:      usize;
-    alloc:    Error;
-}
 
 # a byte range of the document handed to `parse`
 # ---
@@ -392,12 +376,6 @@ fun table_ensure_subtable(a: *Allocator, t: *Table, key: str, tok: Span) res[*Va
     val sr: err[Error] = table_set(a, t, key, empty);
     if (sel sr.err) { ret res[*Value, TomlError].err{TomlError.alloc{sr.err}}; }
     ret res[*Value, TomlError].ok{table_find(t, key)};
-}
-
-# place an unpositioned conflict at the key it was raised for
-fun at(e: TomlError, pos: usize) TomlError {
-    if (sel e.conflict) { ret TomlError.conflict{pos}; }
-    ret e;
 }
 
 # create an empty array with nil backing storage
@@ -2272,9 +2250,6 @@ $if (capability.HOSTED) {
         if (c.live != 0) { ret 3; }
         ret 0;
     }
-
-    use std.allocator.testing;
-    use std_format: std.format;
 
     # each failure is classified and positioned: syntax at the offending byte,
     # overflow and conflict at the literal or key they were raised for
