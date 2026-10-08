@@ -31,6 +31,13 @@ use std.types.string.str;
 use std.types.string.str_equals;
 use std.types.string.str_len;
 use toml.error.at;
+use toml.scan.hex_digit;
+use toml.scan.is_bare_key_char;
+use toml.scan.is_value_term;
+use toml.scan.is_ws_or_newline;
+use toml.scan.skip_to_newline;
+use toml.scan.skip_ws;
+use toml.scan.skip_ws_comments_newlines;
 
 $if (capability.HOSTED) {
     use std.allocator.page;
@@ -719,59 +726,6 @@ pub fun array_len(arr: *Array) usize {
     ret arr.len;
 }
 
-fun is_ws(b: u8) bool {
-    ret b == ' ' || b == '\t';
-}
-
-fun is_ws_or_newline(b: u8) bool {
-    ret b == ' ' || b == '\t' || b == '\n' || b == '\r';
-}
-
-fun is_bare_key_char(b: u8) bool {
-    ret (b >= 'A' && b <= 'Z')
-        || (b >= 'a' && b <= 'z')
-        || (b >= '0' && b <= '9')
-        || b == '_' || b == '-';
-}
-
-fun skip_ws(src: str, i: *usize) {
-    for (is_ws(src[@i])) {
-        @i = @i + 1;
-    }
-}
-
-fun skip_ws_and_newlines(src: str, i: *usize) {
-    for (is_ws_or_newline(src[@i])) {
-        @i = @i + 1;
-    }
-}
-
-fun skip_comment(src: str, i: *usize) {
-    if (src[@i] == '#') {
-        for (src[@i] != 0 && src[@i] != '\n') {
-            @i = @i + 1;
-        }
-    }
-}
-
-fun skip_ws_comments_newlines(src: str, i: *usize) {
-    for {
-        skip_ws_and_newlines(src, i);
-        if (src[@i] == '#') {
-            skip_comment(src, i);
-            cnt;
-        }
-        brk;
-    }
-}
-
-fun skip_to_newline(src: str, i: *usize) {
-    skip_ws(src, i);
-    skip_comment(src, i);
-    if (src[@i] == '\r') { @i = @i + 1; }
-    if (src[@i] == '\n') { @i = @i + 1; }
-}
-
 # allocate a copy of a substring
 # ---
 # a:     allocator
@@ -802,14 +756,6 @@ fun value_fail(e: TomlError) res[Value, TomlError] {
 
 fun value_ok(v: Value) res[Value, TomlError] {
     ret res[Value, TomlError].ok{v};
-}
-
-# return the numeric value of a hex character, or -1
-fun hex_digit(c: u8) i32 {
-    if (c >= '0' && c <= '9') { ret (c - '0')::u32::i32; }
-    if (c >= 'a' && c <= 'f') { ret (c - 'a')::u32::i32 + 10; }
-    if (c >= 'A' && c <= 'F') { ret (c - 'A')::u32::i32 + 10; }
-    ret -1;
 }
 
 # write an escape sequence into buf starting at di
@@ -1385,12 +1331,6 @@ fun parse_bin_int(src: str, i: *usize, sign: i64, at_: usize) res[Value, TomlErr
     }
     if (!any) { ret value_fail(TomlError.syntax{@i}); }
     ret value_ok(value_int(x::i64 * sign));
-}
-
-# check if a byte terminates a bare value
-fun is_value_term(b: u8) bool {
-    ret b == 0 || b == ' ' || b == '\t' || b == '\n' || b == '\r'
-        || b == ',' || b == ']' || b == '}' || b == '#';
 }
 
 # parse "true" or "false"
