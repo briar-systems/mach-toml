@@ -14,7 +14,7 @@ Add the dependency to `mach.toml`:
 ```toml
 [dep.toml]
 git = "https://github.com/briar-systems/mach-toml"
-version = "^0.1"
+ref = "branch/dev"
 ```
 
 Then bind the library in a source file:
@@ -22,6 +22,8 @@ Then bind the library in a source file:
 ```mach
 use toml;
 ```
+
+`toml.parse` reads a TOML 1.0 document into a table owned by an allocator, `toml.get_*` reads values by dotted path, and `toml.dnit` releases the table.
 
 
 ## Contributing
