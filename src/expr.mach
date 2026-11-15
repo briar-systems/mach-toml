@@ -23,15 +23,15 @@ use toml.tree.array_dnit;
 use toml.tree.array_push;
 use toml.tree.dnit;
 use toml.tree.keysegs_dnit;
-use toml.tree.keysegs_make;
+use toml.tree.keysegs_init;
 use toml.tree.table_set;
 use toml.tree.value_dnit;
 use toml.value.Array;
 use toml.value.Table;
 use toml.value.Value;
-use toml.value.array_make;
+use toml.value.array_init;
 use toml.value.span_from;
-use toml.value.table_make;
+use toml.value.table_init;
 use toml.value.value_array;
 use toml.value.value_bool;
 use toml.value.value_fail;
@@ -129,7 +129,7 @@ fun parse_value_literal(a: *Allocator, src: str, i: *usize, depth: usize) res[Va
 # ret:   parsed array Value, or the failure
 fun parse_array_value(a: *Allocator, src: str, i: *usize, depth: usize) res[Value, TomlError] {
     @i = @i + 1;
-    var arr: Array = array_make();
+    var arr: Array = array_init();
 
     for {
         skip_ws_comments_newlines(src, i);
@@ -171,8 +171,8 @@ fun parse_array_value(a: *Allocator, src: str, i: *usize, depth: usize) res[Valu
 # ret:   parsed table Value, or the failure
 fun parse_inline_table(a: *Allocator, src: str, i: *usize, depth: usize) res[Value, TomlError] {
     @i = @i + 1;
-    var t:  Table   = table_make();
-    var ks: KeySegs = keysegs_make();
+    var t:  Table   = table_init();
+    var ks: KeySegs = keysegs_init();
 
     skip_ws(src, i);
     if (src[@i] == '}') {

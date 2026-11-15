@@ -79,7 +79,7 @@ pub rec Table {
 }
 
 # create an empty table with nil backing storage
-pub fun table_make() Table {
+pub fun table_init() Table {
     var t: Table;
     t.keys   = nil;
     t.values = nil;
@@ -89,7 +89,7 @@ pub fun table_make() Table {
 }
 
 # create an empty array with nil backing storage
-pub fun array_make() Array {
+pub fun array_init() Array {
     var a: Array;
     a.items = nil;
     a.len   = 0;

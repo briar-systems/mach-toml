@@ -21,7 +21,7 @@ use toml.value.TYPE_STRING;
 use toml.value.TYPE_TABLE;
 use toml.value.Table;
 use toml.value.Value;
-use toml.value.table_make;
+use toml.value.table_init;
 use toml.value.value_table;
 
 val VALUE_SIZE: usize = $size_of(Value);
@@ -255,7 +255,7 @@ pub fun table_ensure_subtable(a: *Allocator, t: *Table, key: str, tok: Span) res
         ret res[*Value, TomlError].ok{existing};
     }
 
-    var empty: Value = value_table(table_make());
+    var empty: Value = value_table(table_init());
     empty.span = tok;
     empty.key  = tok;
     val err_table_set: err[Error] = table_set(a, t, key, empty);
@@ -299,7 +299,7 @@ pub fun array_push(a: *Allocator, arr: *Array, val_: Value) err[Error] {
 }
 
 # create an empty key segment list
-pub fun keysegs_make() KeySegs {
+pub fun keysegs_init() KeySegs {
     var ks: KeySegs;
     ks.segs  = nil;
     ks.spans = nil;

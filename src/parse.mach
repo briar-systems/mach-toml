@@ -24,7 +24,7 @@ use toml.tree.array_dnit;
 use toml.tree.array_push;
 use toml.tree.dnit;
 use toml.tree.keysegs_dnit;
-use toml.tree.keysegs_make;
+use toml.tree.keysegs_init;
 use toml.tree.table_ensure_subtable;
 use toml.tree.table_set;
 use toml.tree.value_dnit;
@@ -33,9 +33,9 @@ use toml.value.TYPE_ARRAY;
 use toml.value.TYPE_TABLE;
 use toml.value.Table;
 use toml.value.Value;
-use toml.value.array_make;
+use toml.value.array_init;
 use toml.value.span_from;
-use toml.value.table_make;
+use toml.value.table_init;
 use toml.value.value_array;
 use toml.value.value_table;
 
@@ -117,7 +117,7 @@ fun navigate_for_array_table(a: *Allocator, root: *Table, ks: *KeySegs) res[*Val
         if (existing.tag != TYPE_ARRAY) {
             ret res[*Value, TomlError].err{TomlError.conflict{0}};
         }
-        var new_table:      Table      = table_make();
+        var new_table:      Table      = table_init();
         val new_val:        Value      = value_table(new_table);
         val err_array_push: err[Error] = array_push(a, ?existing.data.array, new_val);
         if (sel err_array_push.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_array_push.err}}; }
@@ -127,8 +127,8 @@ fun navigate_for_array_table(a: *Allocator, root: *Table, ks: *KeySegs) res[*Val
     }
 
     # first occurrence: create the array with one empty table
-    var arr:            Array      = array_make();
-    var new_table:      Table      = table_make();
+    var arr:            Array      = array_init();
+    var new_table:      Table      = table_init();
     val new_val:        Value      = value_table(new_table);
     val err_array_push: err[Error] = array_push(a, ?arr, new_val);
     if (sel err_array_push.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_array_push.err}}; }
@@ -161,8 +161,8 @@ pub fun parse(a: *Allocator, src: str) res[Table, TomlError] {
     # the two owned values the walk builds are held HERE, so every failure inside
     # it releases them on the way out. the walk itself only reports the failure -
     # it never has to unwind, and a new error return cannot forget to (#3001)
-    var root:           Table          = table_make();
-    var ks:             KeySegs        = keysegs_make();
+    var root:           Table          = table_init();
+    var ks:             KeySegs        = keysegs_init();
     val err_parse_walk: err[TomlError] = parse_walk(a, src, ?root, ?ks);
     keysegs_dnit(a, ?ks);
     if (sel err_parse_walk.err) {
@@ -456,7 +456,7 @@ $if (capability.HOSTED) {
     # build "k = " followed by `n` open brackets, the shape that used to recurse
     # once per bracket until the stack ran out
     #[testing]
-    fun t_nest_open(a: *Allocator, n: usize) str {
+    fun nested_prefix(a: *Allocator, n: usize) str {
         val total:        usize           = 4 + n;
         val res_allocate: res[*u8, Error] = allocate[u8](a, total + 1);
         if (sel res_allocate.err) { ret nil; }
@@ -480,7 +480,7 @@ $if (capability.HOSTED) {
     # a value, so it costs one descent less. with it, `n` brackets is exactly `n`
     # levels deep, which is what makes the boundary below mean what it says.
     #[testing]
-    fun t_close(a: *Allocator, open_: str, n: usize) str {
+    fun nested_document(a: *Allocator, open_: str, n: usize) str {
         val head:         usize           = str_len(open_);
         val total:        usize           = head + 1 + n;
         val res_allocate: res[*u8, Error] = allocate[u8](a, total + 1);
@@ -512,9 +512,9 @@ $if (capability.HOSTED) {
 
         # MAX_VALUE_DEPTH open brackets, each closed: the deepest accepted document
         val n_ok:    usize = MAX_VALUE_DEPTH;
-        val open_ok: str   = t_nest_open(?a, n_ok);
+        val open_ok: str   = nested_prefix(?a, n_ok);
         if (open_ok == nil) { ret 2; }
-        val doc_ok: str = t_close(?a, open_ok, n_ok);
+        val doc_ok: str = nested_document(?a, open_ok, n_ok);
         if (doc_ok == nil) { ret 3; }
         val res_parse: res[Table, TomlError] = parse(?a, doc_ok);
         if (sel res_parse.err) { bad = 4; }
@@ -528,9 +528,9 @@ $if (capability.HOSTED) {
         # one deeper is refused
         if (bad == 0) {
             val n_no:    usize = MAX_VALUE_DEPTH + 1;
-            val open_no: str   = t_nest_open(?a, n_no);
+            val open_no: str   = nested_prefix(?a, n_no);
             if (open_no == nil) { ret 5; }
-            val doc_no: str = t_close(?a, open_no, n_no);
+            val doc_no: str = nested_document(?a, open_no, n_no);
             if (doc_no == nil) { ret 6; }
             val res_parse: res[Table, TomlError] = parse(?a, doc_no);
             if (!sel res_parse.err) { bad = 7; }
@@ -657,7 +657,7 @@ $if (capability.HOSTED) {
         var ordinal: usize = 1;
         for (ordinal <= 512) {
             var tracker:  testing.Testing;
-            val err_made: err[Error] = testing.make(?tracker);
+            val err_made: err[Error] = testing.init(?tracker);
             if (sel err_made.err) { ret 1; }
             testing.fail_at_ordinal(?tracker, ordinal);
             val a: *Allocator = testing.allocator_of(?tracker);
