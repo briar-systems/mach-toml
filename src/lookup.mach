@@ -70,10 +70,10 @@ pub fun get(t: *Table, path: str) opt[*Value] {
 
 # the value at a path when it has the wanted shape
 fun get_typed(t: *Table, path: str, tag: u8) *Value {
-    val v: opt[*Value] = get(t, path);
-    if (sel v.none)        { ret nil; }
-    if (v.some.tag != tag) { ret nil; }
-    ret v.some;
+    val opt_path_entry: opt[*Value] = get(t, path);
+    if (sel opt_path_entry.none)        { ret nil; }
+    if (opt_path_entry.some.tag != tag) { ret nil; }
+    ret opt_path_entry.some;
 }
 
 # find a value by key prefix and length

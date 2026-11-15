@@ -102,9 +102,9 @@ fun navigate_for_array_table(a: *Allocator, root: *Table, ks: *KeySegs) res[*Val
             }
         }
         or {
-            val tr: res[*Value, TomlError] = table_ensure_subtable(a, parent, ks.segs[i], ks.spans[i]);
-            if (sel tr.err) { ret tr; }
-            parent = ?tr.ok.data.table;
+            val res_table_ensure_subtable: res[*Value, TomlError] = table_ensure_subtable(a, parent, ks.segs[i], ks.spans[i]);
+            if (sel res_table_ensure_subtable.err) { ret res_table_ensure_subtable; }
+            parent = ?res_table_ensure_subtable.ok.data.table;
         }
         i = i + 1;
     }
@@ -117,30 +117,30 @@ fun navigate_for_array_table(a: *Allocator, root: *Table, ks: *KeySegs) res[*Val
         if (existing.tag != TYPE_ARRAY) {
             ret res[*Value, TomlError].err{TomlError.conflict{0}};
         }
-        var new_table: Table      = table_make();
-        val new_val:   Value      = value_table(new_table);
-        val pr:        err[Error] = array_push(a, ?existing.data.array, new_val);
-        if (sel pr.err) { ret res[*Value, TomlError].err{TomlError.alloc{pr.err}}; }
+        var new_table:      Table      = table_make();
+        val new_val:        Value      = value_table(new_table);
+        val err_array_push: err[Error] = array_push(a, ?existing.data.array, new_val);
+        if (sel err_array_push.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_array_push.err}}; }
 
         val items: *Value = existing.data.array.items::*Value;
         ret res[*Value, TomlError].ok{?items[existing.data.array.len - 1]};
     }
 
     # first occurrence: create the array with one empty table
-    var arr:       Array      = array_make();
-    var new_table: Table      = table_make();
-    val new_val:   Value      = value_table(new_table);
-    val pr:        err[Error] = array_push(a, ?arr, new_val);
-    if (sel pr.err) { ret res[*Value, TomlError].err{TomlError.alloc{pr.err}}; }
+    var arr:            Array      = array_make();
+    var new_table:      Table      = table_make();
+    val new_val:        Value      = value_table(new_table);
+    val err_array_push: err[Error] = array_push(a, ?arr, new_val);
+    if (sel err_array_push.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_array_push.err}}; }
 
     # the array itself is positioned at the header that first named it
     var arr_val: Value = value_array(arr);
     arr_val.span = ks.spans[ks.len - 1];
     arr_val.key  = ks.spans[ks.len - 1];
-    val sr: err[Error] = table_set(a, parent, final_key, arr_val);
-    if (sel sr.err) {
+    val err_table_set: err[Error] = table_set(a, parent, final_key, arr_val);
+    if (sel err_table_set.err) {
         array_dnit(a, ?arr);
-        ret res[*Value, TomlError].err{TomlError.alloc{sr.err}};
+        ret res[*Value, TomlError].err{TomlError.alloc{err_table_set.err}};
     }
 
     val added: *Value = table_find(parent, final_key);
@@ -161,13 +161,13 @@ pub fun parse(a: *Allocator, src: str) res[Table, TomlError] {
     # the two owned values the walk builds are held HERE, so every failure inside
     # it releases them on the way out. the walk itself only reports the failure -
     # it never has to unwind, and a new error return cannot forget to (#3001)
-    var root: Table          = table_make();
-    var ks:   KeySegs        = keysegs_make();
-    val r:    err[TomlError] = parse_walk(a, src, ?root, ?ks);
+    var root:           Table          = table_make();
+    var ks:             KeySegs        = keysegs_make();
+    val err_parse_walk: err[TomlError] = parse_walk(a, src, ?root, ?ks);
     keysegs_dnit(a, ?ks);
-    if (sel r.err) {
+    if (sel err_parse_walk.err) {
         dnit(a, ?root);
-        ret res[Table, TomlError].err{r.err};
+        ret res[Table, TomlError].err{err_parse_walk.err};
     }
     ret res[Table, TomlError].ok{root};
 }
@@ -188,14 +188,14 @@ pub fun parse_bytes(a: *Allocator, src: *u8, n: usize) res[Table, TomlError] {
         i = i + 1;
     }
     if (n == 0xffffffffffffffff::usize) { ret res[Table, TomlError].err{TomlError.alloc{Error.overflow{}}}; }
-    val r: res[*u8, Error] = allocate[u8](a, n + 1);
-    if (sel r.err) { ret res[Table, TomlError].err{TomlError.alloc{r.err}}; }
-    val text: *u8 = r.ok;
+    val res_allocate: res[*u8, Error] = allocate[u8](a, n + 1);
+    if (sel res_allocate.err) { ret res[Table, TomlError].err{TomlError.alloc{res_allocate.err}}; }
+    val text: *u8 = res_allocate.ok;
     memory.raw_copy(text::ptr, src::ptr, n);
     text[n] = 0;
-    val parsed: res[Table, TomlError] = parse(a, text::str);
+    val res_parsed: res[Table, TomlError] = parse(a, text::str);
     deallocate[u8](a, text, n + 1);
-    ret parsed;
+    ret res_parsed;
 }
 
 # the document walk: table headers, arrays of tables, and key/value lines
@@ -224,9 +224,9 @@ fun parse_walk(a: *Allocator, src: str, root: *Table, ks: *KeySegs) err[TomlErro
             skip_ws(src, ?i);
 
             keysegs_dnit(a, ks);
-            val key_at: usize          = i;
-            val ksr:    err[TomlError] = parse_key_path(a, src, ?i, ks);
-            if (sel ksr.err) { ret ksr; }
+            val key_at:  usize          = i;
+            val err_ksr: err[TomlError] = parse_key_path(a, src, ?i, ks);
+            if (sel err_ksr.err) { ret err_ksr; }
 
             skip_ws(src, ?i);
             if (src[i] != ']' || src[i + 1] != ']') {
@@ -234,11 +234,11 @@ fun parse_walk(a: *Allocator, src: str, root: *Table, ks: *KeySegs) err[TomlErro
             }
             i = i + 2;
 
-            val tr: res[*Value, TomlError] = navigate_for_array_table(a, root, ks);
-            if (sel tr.err) { ret err[TomlError].err{at(tr.err, key_at)}; }
-            tr.ok.span = span_from(header_at, i);
-            tr.ok.key  = ks.spans[ks.len - 1];
-            current    = ?tr.ok.data.table;
+            val res_navigate_for_array_table: res[*Value, TomlError] = navigate_for_array_table(a, root, ks);
+            if (sel res_navigate_for_array_table.err) { ret err[TomlError].err{at(res_navigate_for_array_table.err, key_at)}; }
+            res_navigate_for_array_table.ok.span = span_from(header_at, i);
+            res_navigate_for_array_table.ok.key  = ks.spans[ks.len - 1];
+            current                              = ?res_navigate_for_array_table.ok.data.table;
 
             skip_to_newline(src, ?i);
             cnt;
@@ -251,9 +251,9 @@ fun parse_walk(a: *Allocator, src: str, root: *Table, ks: *KeySegs) err[TomlErro
             skip_ws(src, ?i);
 
             keysegs_dnit(a, ks);
-            val key_at: usize          = i;
-            val ksr:    err[TomlError] = parse_key_path(a, src, ?i, ks);
-            if (sel ksr.err) { ret ksr; }
+            val key_at:  usize          = i;
+            val err_ksr: err[TomlError] = parse_key_path(a, src, ?i, ks);
+            if (sel err_ksr.err) { ret err_ksr; }
 
             skip_ws(src, ?i);
             if (src[i] != ']') {
@@ -267,13 +267,13 @@ fun parse_walk(a: *Allocator, src: str, root: *Table, ks: *KeySegs) err[TomlErro
             var target: *Table = root;
             var si:     usize  = 0;
             for (si < ks.len) {
-                val tr: res[*Value, TomlError] = table_ensure_subtable(a, target, ks.segs[si], ks.spans[si]);
-                if (sel tr.err) { ret err[TomlError].err{at(tr.err, key_at)}; }
+                val res_table_ensure_subtable: res[*Value, TomlError] = table_ensure_subtable(a, target, ks.segs[si], ks.spans[si]);
+                if (sel res_table_ensure_subtable.err) { ret err[TomlError].err{at(res_table_ensure_subtable.err, key_at)}; }
                 if (si == ks.len - 1) {
-                    tr.ok.span = span_from(header_at, i);
-                    tr.ok.key  = ks.spans[si];
+                    res_table_ensure_subtable.ok.span = span_from(header_at, i);
+                    res_table_ensure_subtable.ok.key  = ks.spans[si];
                 }
-                target = ?tr.ok.data.table;
+                target = ?res_table_ensure_subtable.ok.data.table;
                 si     = si + 1;
             }
             current = target;
@@ -284,9 +284,9 @@ fun parse_walk(a: *Allocator, src: str, root: *Table, ks: *KeySegs) err[TomlErro
 
         # key = value
         keysegs_dnit(a, ks);
-        val key_at: usize          = i;
-        val ksr:    err[TomlError] = parse_key_path(a, src, ?i, ks);
-        if (sel ksr.err) { ret ksr; }
+        val key_at:  usize          = i;
+        val err_ksr: err[TomlError] = parse_key_path(a, src, ?i, ks);
+        if (sel err_ksr.err) { ret err_ksr; }
 
         skip_ws(src, ?i);
         if (src[i] != '=') {
@@ -294,22 +294,22 @@ fun parse_walk(a: *Allocator, src: str, root: *Table, ks: *KeySegs) err[TomlErro
         }
         i = i + 1;
 
-        val vr: res[Value, TomlError] = parse_value(a, src, ?i, 0);
-        if (sel vr.err) { ret err[TomlError].err{vr.err}; }
+        val res_parse_value: res[Value, TomlError] = parse_value(a, src, ?i, 0);
+        if (sel res_parse_value.err) { ret err[TomlError].err{res_parse_value.err}; }
 
-        var parsed: Value = vr.ok;
+        var parsed: Value = res_parse_value.ok;
         parsed.key = ks.spans[ks.len - 1];
 
-        val nr: res[*Table, TomlError] = navigate_segs(a, current, ks);
-        if (sel nr.err) {
+        val res_navigate_segs: res[*Table, TomlError] = navigate_segs(a, current, ks);
+        if (sel res_navigate_segs.err) {
             value_dnit(a, ?parsed);
-            ret err[TomlError].err{at(nr.err, key_at)};
+            ret err[TomlError].err{at(res_navigate_segs.err, key_at)};
         }
 
-        val sr: err[Error] = table_set(a, nr.ok, ks.segs[ks.len - 1], parsed);
-        if (sel sr.err) {
+        val err_table_set: err[Error] = table_set(a, res_navigate_segs.ok, ks.segs[ks.len - 1], parsed);
+        if (sel err_table_set.err) {
             value_dnit(a, ?parsed);
-            ret err[TomlError].err{TomlError.alloc{sr.err}};
+            ret err[TomlError].err{TomlError.alloc{err_table_set.err}};
         }
 
         skip_to_newline(src, ?i);
@@ -322,13 +322,13 @@ $if (capability.HOSTED) {
     # whether document `doc` sets x to a float within tol of want
     #[testing]
     fun float_is(a: *Allocator, doc: str, want: f64, tol: f64) bool {
-        val r: res[Table, TomlError] = parse(a, doc);
-        if (sel r.err) { ret false; }
-        var t: Table    = r.ok;
-        val o: opt[f64] = get_float(?t, "x");
+        val res_parse: res[Table, TomlError] = parse(a, doc);
+        if (sel res_parse.err) { ret false; }
+        var t:         Table    = res_parse.ok;
+        val opt_float: opt[f64] = get_float(?t, "x");
         dnit(a, ?t);
-        if (!sel o.some) { ret false; }
-        val v: f64 = o.some;
+        if (!sel opt_float.some) { ret false; }
+        val v: f64 = opt_float.some;
         ret v > want - tol && v < want + tol;
     }
 
@@ -364,54 +364,54 @@ $if (capability.HOSTED) {
     test toml__lookups {
         var a: Allocator;
         page.make(?a);
-        val r: res[Table, TomlError] = parse(?a, teardown_doc());
-        if (sel r.err) { ret 1; }
-        var t: Table = r.ok;
+        val res_parse: res[Table, TomlError] = parse(?a, teardown_doc());
+        if (sel res_parse.err) { ret 1; }
+        var t: Table = res_parse.ok;
         fin { dnit(?a, ?t); }
 
-        val title: opt[str] = get_str(?t, "title");
-        if (sel title.none)                  { ret 2; }
-        if (!str_equals(title.some, "demo")) { ret 3; }
-        val deep: opt[str] = get_str(?t, "deep.nested.table.x");
-        if (sel deep.none)               { ret 4; }
-        if (!str_equals(deep.some, "y")) { ret 5; }
-        val missing: opt[str] = get_str(?t, "owner.missing");
-        if (sel missing.some) { ret 6; }
-        val through_scalar: opt[*Value] = get(?t, "title.inner");
-        if (sel through_scalar.some) { ret 7; }
-        val wrong_shape: opt[str] = get_str(?t, "k1");
-        if (sel wrong_shape.some) { ret 8; }
-        val as_int: opt[i64] = get_int(?t, "k1");
-        if (sel as_int.none)  { ret 9; }
-        if (as_int.some != 1) { ret 10; }
+        val opt_title: opt[str] = get_str(?t, "title");
+        if (sel opt_title.none)                  { ret 2; }
+        if (!str_equals(opt_title.some, "demo")) { ret 3; }
+        val opt_deep: opt[str] = get_str(?t, "deep.nested.table.x");
+        if (sel opt_deep.none)               { ret 4; }
+        if (!str_equals(opt_deep.some, "y")) { ret 5; }
+        val opt_missing: opt[str] = get_str(?t, "owner.missing");
+        if (sel opt_missing.some) { ret 6; }
+        val opt_through_scalar: opt[*Value] = get(?t, "title.inner");
+        if (sel opt_through_scalar.some) { ret 7; }
+        val opt_wrong_shape: opt[str] = get_str(?t, "k1");
+        if (sel opt_wrong_shape.some) { ret 8; }
+        val opt_as_int: opt[i64] = get_int(?t, "k1");
+        if (sel opt_as_int.none)  { ret 9; }
+        if (opt_as_int.some != 1) { ret 10; }
 
-        val owner: opt[*Table] = get_table(?t, "owner");
-        if (sel owner.none) { ret 11; }
-        val not_table: opt[*Table] = get_table(?t, "title");
-        if (sel not_table.some) { ret 12; }
-        val nums: opt[*Array] = get_array(owner.some, "nums");
-        if (sel nums.none)             { ret 13; }
-        if (array_len(nums.some) != 8) { ret 14; }
-        val last: opt[*Value] = array_get(nums.some, 7);
-        if (sel last.none)                                                { ret 15; }
-        if (last.some.tag != TYPE_INTEGER || last.some.data.integer != 8) { ret 16; }
-        val past: opt[*Value] = array_get(nums.some, 8);
-        if (sel past.some) { ret 17; }
-        val not_array: opt[*Array] = get_array(?t, "owner");
-        if (sel not_array.some) { ret 18; }
+        val opt_owner: opt[*Table] = get_table(?t, "owner");
+        if (sel opt_owner.none) { ret 11; }
+        val opt_not_table: opt[*Table] = get_table(?t, "title");
+        if (sel opt_not_table.some) { ret 12; }
+        val opt_nums: opt[*Array] = get_array(opt_owner.some, "nums");
+        if (sel opt_nums.none)             { ret 13; }
+        if (array_len(opt_nums.some) != 8) { ret 14; }
+        val opt_last: opt[*Value] = array_get(opt_nums.some, 7);
+        if (sel opt_last.none)                                                    { ret 15; }
+        if (opt_last.some.tag != TYPE_INTEGER || opt_last.some.data.integer != 8) { ret 16; }
+        val opt_past: opt[*Value] = array_get(opt_nums.some, 8);
+        if (sel opt_past.some) { ret 17; }
+        val opt_not_array: opt[*Array] = get_array(?t, "owner");
+        if (sel opt_not_array.some) { ret 18; }
 
-        val n: usize = table_len(owner.some);
+        val n: usize = table_len(opt_owner.some);
         if (n == 0) { ret 19; }
-        val first_key: opt[str] = table_key(owner.some, 0);
-        if (sel first_key.none)                  { ret 20; }
-        if (!str_equals(first_key.some, "name")) { ret 21; }
-        val first_value: opt[*Value] = table_value(owner.some, 0);
-        if (sel first_value.none)                { ret 22; }
-        if (first_value.some.tag != TYPE_STRING) { ret 23; }
-        val no_key: opt[str] = table_key(owner.some, n);
-        if (sel no_key.some) { ret 24; }
-        val no_value: opt[*Value] = table_value(owner.some, n);
-        if (sel no_value.some) { ret 25; }
+        val opt_first_key: opt[str] = table_key(opt_owner.some, 0);
+        if (sel opt_first_key.none)                  { ret 20; }
+        if (!str_equals(opt_first_key.some, "name")) { ret 21; }
+        val opt_first_value: opt[*Value] = table_value(opt_owner.some, 0);
+        if (sel opt_first_value.none)                { ret 22; }
+        if (opt_first_value.some.tag != TYPE_STRING) { ret 23; }
+        val opt_no_key: opt[str] = table_key(opt_owner.some, n);
+        if (sel opt_no_key.some) { ret 24; }
+        val opt_no_value: opt[*Value] = table_value(opt_owner.some, n);
+        if (sel opt_no_value.some) { ret 25; }
         ret 0;
     }
 
@@ -420,9 +420,9 @@ $if (capability.HOSTED) {
         var a: Allocator;
         testing.counting_make(?c, ?a);
 
-        val r: res[Table, TomlError] = parse(?a, teardown_doc());
-        if (sel r.err) { ret 2; }
-        var t: Table = r.ok;
+        val res_parse: res[Table, TomlError] = parse(?a, teardown_doc());
+        if (sel res_parse.err) { ret 2; }
+        var t: Table = res_parse.ok;
         if (c.live == 0) { ret 3; } # the parse must actually have allocated
 
         dnit(?a, ?t);
@@ -442,10 +442,10 @@ $if (capability.HOSTED) {
         var a: Allocator;
         testing.counting_make(?c, ?a);
 
-        val r: res[Table, TomlError] = parse(?a,
+        val res_parse: res[Table, TomlError] = parse(?a,
             "dup = \"first value here\"\ndup = \"second value here\"\ndup = [1, 2, 3]\ndup = { x = \"y\" }\n");
-        if (sel r.err) { ret 2; }
-        var t: Table = r.ok;
+        if (sel res_parse.err) { ret 2; }
+        var t: Table = res_parse.ok;
         if (table_len(?t) != 1) { ret 3; }
 
         dnit(?a, ?t);
@@ -457,10 +457,10 @@ $if (capability.HOSTED) {
     # once per bracket until the stack ran out
     #[testing]
     fun t_nest_open(a: *Allocator, n: usize) str {
-        val total: usize           = 4 + n;
-        val r:     res[*u8, Error] = allocate[u8](a, total + 1);
-        if (sel r.err) { ret nil; }
-        val buf: *u8 = r.ok;
+        val total:        usize           = 4 + n;
+        val res_allocate: res[*u8, Error] = allocate[u8](a, total + 1);
+        if (sel res_allocate.err) { ret nil; }
+        val buf: *u8 = res_allocate.ok;
         buf[0] = 'k';
         buf[1] = ' ';
         buf[2] = '=';
@@ -481,11 +481,11 @@ $if (capability.HOSTED) {
     # levels deep, which is what makes the boundary below mean what it says.
     #[testing]
     fun t_close(a: *Allocator, open_: str, n: usize) str {
-        val head:  usize           = str_len(open_);
-        val total: usize           = head + 1 + n;
-        val r:     res[*u8, Error] = allocate[u8](a, total + 1);
-        if (sel r.err) { ret nil; }
-        val buf: *u8   = r.ok;
+        val head:         usize           = str_len(open_);
+        val total:        usize           = head + 1 + n;
+        val res_allocate: res[*u8, Error] = allocate[u8](a, total + 1);
+        if (sel res_allocate.err) { ret nil; }
+        val buf: *u8   = res_allocate.ok;
         var i:   usize = 0;
         for (i < head) {
             buf[i] = open_[i];
@@ -516,10 +516,10 @@ $if (capability.HOSTED) {
         if (open_ok == nil) { ret 2; }
         val doc_ok: str = t_close(?a, open_ok, n_ok);
         if (doc_ok == nil) { ret 3; }
-        val r_ok: res[Table, TomlError] = parse(?a, doc_ok);
-        if (sel r_ok.err) { bad = 4; }
-        if (sel r_ok.ok) {
-            var t: Table = r_ok.ok;
+        val res_parse: res[Table, TomlError] = parse(?a, doc_ok);
+        if (sel res_parse.err) { bad = 4; }
+        if (sel res_parse.ok) {
+            var t: Table = res_parse.ok;
             dnit(?a, ?t);
         }
         deallocate[u8](?a, open_ok, 4 + n_ok + 1);
@@ -532,10 +532,10 @@ $if (capability.HOSTED) {
             if (open_no == nil) { ret 5; }
             val doc_no: str = t_close(?a, open_no, n_no);
             if (doc_no == nil) { ret 6; }
-            val r_no: res[Table, TomlError] = parse(?a, doc_no);
-            if (!sel r_no.err) { bad = 7; }
-            if (sel r_no.err) {
-                if (!sel r_no.err.depth) { bad = 8; }
+            val res_parse: res[Table, TomlError] = parse(?a, doc_no);
+            if (!sel res_parse.err) { bad = 7; }
+            if (sel res_parse.err) {
+                if (!sel res_parse.err.depth) { bad = 8; }
             }
             deallocate[u8](?a, open_no, 4 + n_no + 1);
             deallocate[u8](?a, doc_no, 4 + n_no + 1 + n_no + 1);
@@ -557,9 +557,9 @@ $if (capability.HOSTED) {
         testing.counting_make(?c, ?a);
 
         # `k` holds an integer, then `k.deeper` asks to descend through it
-        val r: res[Table, TomlError] = parse(?a, "x = { k = 1, k.deeper = \"a heap allocated string\" }\n");
-        if (!sel r.err)  { ret 2; }
-        if (c.live != 0) { ret 3; }
+        val res_parse: res[Table, TomlError] = parse(?a, "x = { k = 1, k.deeper = \"a heap allocated string\" }\n");
+        if (!sel res_parse.err) { ret 2; }
+        if (c.live != 0)        { ret 3; }
         ret 0;
     }
 
@@ -570,35 +570,35 @@ $if (capability.HOSTED) {
         var a: Allocator;
         testing.counting_make(?c, ?a);
 
-        val eq_: res[Table, TomlError] = parse(?a, "a = 1\nb 2\n");
-        if (!sel eq_.err)        { ret 2; }
-        if (!sel eq_.err.syntax) { ret 3; }
-        if (eq_.err.syntax != 8) { ret 3; }
+        val res_parse: res[Table, TomlError] = parse(?a, "a = 1\nb 2\n");
+        if (!sel res_parse.err)        { ret 2; }
+        if (!sel res_parse.err.syntax) { ret 3; }
+        if (res_parse.err.syntax != 8) { ret 3; }
 
-        val big: res[Table, TomlError] = parse(?a, "x = 1\ny = 99999999999999999999\n");
-        if (!sel big.err)           { ret 4; }
-        if (!sel big.err.overflow)  { ret 5; }
-        if (big.err.overflow != 10) { ret 5; }
+        val res_big: res[Table, TomlError] = parse(?a, "x = 1\ny = 99999999999999999999\n");
+        if (!sel res_big.err)           { ret 4; }
+        if (!sel res_big.err.overflow)  { ret 5; }
+        if (res_big.err.overflow != 10) { ret 5; }
 
-        val clash: res[Table, TomlError] = parse(?a, "k = 1\nk.deeper = 2\n");
-        if (!sel clash.err)          { ret 6; }
-        if (!sel clash.err.conflict) { ret 7; }
-        if (clash.err.conflict != 6) { ret 7; }
+        val res_clash: res[Table, TomlError] = parse(?a, "k = 1\nk.deeper = 2\n");
+        if (!sel res_clash.err)          { ret 6; }
+        if (!sel res_clash.err.conflict) { ret 7; }
+        if (res_clash.err.conflict != 6) { ret 7; }
 
-        val header: res[Table, TomlError] = parse(?a, "n = 1\n[[n]]\n");
-        if (!sel header.err)          { ret 8; }
-        if (!sel header.err.conflict) { ret 9; }
-        if (header.err.conflict != 8) { ret 9; }
+        val res_header: res[Table, TomlError] = parse(?a, "n = 1\n[[n]]\n");
+        if (!sel res_header.err)          { ret 8; }
+        if (!sel res_header.err.conflict) { ret 9; }
+        if (res_header.err.conflict != 8) { ret 9; }
 
-        val esc: res[Table, TomlError] = parse(?a, "s = \"ab\\qcd\"\n");
-        if (!sel esc.err)        { ret 10; }
-        if (!sel esc.err.syntax) { ret 11; }
-        if (esc.err.syntax != 8) { ret 11; }
+        val res_esc: res[Table, TomlError] = parse(?a, "s = \"ab\\qcd\"\n");
+        if (!sel res_esc.err)        { ret 10; }
+        if (!sel res_esc.err.syntax) { ret 11; }
+        if (res_esc.err.syntax != 8) { ret 11; }
 
-        val open_: res[Table, TomlError] = parse(?a, "s = 'abc\n");
-        if (!sel open_.err)        { ret 12; }
-        if (!sel open_.err.syntax) { ret 13; }
-        if (open_.err.syntax != 8) { ret 13; }
+        val res_open: res[Table, TomlError] = parse(?a, "s = 'abc\n");
+        if (!sel res_open.err)        { ret 12; }
+        if (!sel res_open.err.syntax) { ret 13; }
+        if (res_open.err.syntax != 8) { ret 13; }
 
         if (c.live != 0) { ret 14; }
         ret 0;
@@ -611,19 +611,19 @@ $if (capability.HOSTED) {
         var a: Allocator;
         testing.counting_make(?c, ?a);
 
-        val short: res[Table, TomlError] = parse(?a, "s = \"ab\\u0000\"\n");
-        if (!sel short.err)     { ret 1; }
-        if (!sel short.err.nul) { ret 2; }
-        if (short.err.nul != 7) { ret 2; }
+        val res_short: res[Table, TomlError] = parse(?a, "s = \"ab\\u0000\"\n");
+        if (!sel res_short.err)     { ret 1; }
+        if (!sel res_short.err.nul) { ret 2; }
+        if (res_short.err.nul != 7) { ret 2; }
 
-        val long: res[Table, TomlError] = parse(?a, "x = 1\ns = \"\"\"a\\U00000000\"\"\"\n");
-        if (!sel long.err)      { ret 3; }
-        if (!sel long.err.nul)  { ret 4; }
-        if (long.err.nul != 14) { ret 4; }
+        val res_long: res[Table, TomlError] = parse(?a, "x = 1\ns = \"\"\"a\\U00000000\"\"\"\n");
+        if (!sel res_long.err)      { ret 3; }
+        if (!sel res_long.err.nul)  { ret 4; }
+        if (res_long.err.nul != 14) { ret 4; }
 
-        val literal: res[Table, TomlError] = parse(?a, "s = 'a\\u0000'\n");
-        if (sel literal.err) { ret 5; }
-        var lt: Table = literal.ok;
+        val res_literal: res[Table, TomlError] = parse(?a, "s = 'a\\u0000'\n");
+        if (sel res_literal.err) { ret 5; }
+        var lt: Table = res_literal.ok;
         dnit(?a, ?lt);
 
         var raw: [8]u8;
@@ -635,16 +635,16 @@ $if (capability.HOSTED) {
         raw[5] = ' ';
         raw[6] = 0;
         raw[7] = '\n';
-        val bytes: res[Table, TomlError] = parse_bytes(?a, ?raw[0], 8);
-        if (!sel bytes.err)     { ret 6; }
-        if (!sel bytes.err.nul) { ret 7; }
-        if (bytes.err.nul != 6) { ret 7; }
+        val res_bytes: res[Table, TomlError] = parse_bytes(?a, ?raw[0], 8);
+        if (!sel res_bytes.err)     { ret 6; }
+        if (!sel res_bytes.err.nul) { ret 7; }
+        if (res_bytes.err.nul != 6) { ret 7; }
 
-        val clean: res[Table, TomlError] = parse_bytes(?a, ?raw[0], 5);
-        if (sel clean.err) { ret 8; }
-        var ct: Table    = clean.ok;
-        val x:  opt[i64] = get_int(?ct, "x");
-        if (!sel x.some) { ret 9; }
+        val res_clean: res[Table, TomlError] = parse_bytes(?a, ?raw[0], 5);
+        if (sel res_clean.err) { ret 8; }
+        var ct:      Table    = res_clean.ok;
+        val opt_int: opt[i64] = get_int(?ct, "x");
+        if (!sel opt_int.some) { ret 9; }
         dnit(?a, ?ct);
 
         if (c.live != 0) { ret 10; }
@@ -656,29 +656,29 @@ $if (capability.HOSTED) {
     test toml__refused_acquisition_strands_nothing {
         var ordinal: usize = 1;
         for (ordinal <= 512) {
-            var tracker: testing.Testing;
-            val made:    err[Error] = testing.make(?tracker);
-            if (sel made.err) { ret 1; }
+            var tracker:  testing.Testing;
+            val err_made: err[Error] = testing.make(?tracker);
+            if (sel err_made.err) { ret 1; }
             testing.fail_at_ordinal(?tracker, ordinal);
             val a: *Allocator = testing.allocator_of(?tracker);
 
-            val r:        res[Table, TomlError] = parse(a, teardown_doc());
-            var accepted: bool                  = false;
-            if (sel r.err) {
-                if (!sel r.err.alloc) {
+            val res_parse: res[Table, TomlError] = parse(a, teardown_doc());
+            var accepted:  bool                  = false;
+            if (sel res_parse.err) {
+                if (!sel res_parse.err.alloc) {
                     testing.dnit(?tracker);
                     ret 2;
                 }
-                if (!sel r.err.alloc.exhausted) {
+                if (!sel res_parse.err.alloc.exhausted) {
                     testing.dnit(?tracker);
                     ret 3;
                 }
             }
-            if (sel r.ok) {
-                var t: Table = r.ok;
+            if (sel res_parse.ok) {
+                var t: Table = res_parse.ok;
                 accepted = true;
-                val released: err[Error] = dnit(a, ?t);
-                if (sel released.err) {
+                val err_released: err[Error] = dnit(a, ?t);
+                if (sel err_released.err) {
                     testing.dnit(?tracker);
                     ret 4;
                 }
@@ -711,86 +711,86 @@ $if (capability.HOSTED) {
         var a: Allocator;
         testing.counting_make(?c, ?a);
 
-        val doc: str                   = "# manifest\n[project]\nname = \"std\"\nmach = \"^5.8\"\ndeps.core.version = 2\ntargets = [ \"linux\", 'win' ]\n[project.\"quoted key\"]\nx = { y = true }\n[[artifact]]\nkind = \"lib\"\n[[artifact]]\nkind = \"bin\"\n";
-        val r:   res[Table, TomlError] = parse(?a, doc);
-        if (sel r.err) { ret 2; }
-        var t: Table = r.ok;
+        val doc:       str                   = "# manifest\n[project]\nname = \"std\"\nmach = \"^5.8\"\ndeps.core.version = 2\ntargets = [ \"linux\", 'win' ]\n[project.\"quoted key\"]\nx = { y = true }\n[[artifact]]\nkind = \"lib\"\n[[artifact]]\nkind = \"bin\"\n";
+        val res_parse: res[Table, TomlError] = parse(?a, doc);
+        if (sel res_parse.err) { ret 2; }
+        var t: Table = res_parse.ok;
 
         # a header-defined table: the header line is its span, the last segment its key
-        val project: opt[*Value] = get(?t, "project");
-        if (!sel project.some)                  { ret 3; }
-        if (!span_is(project.some.span, 11, 9)) { ret 4; }
-        if (!span_is(project.some.key, 12, 7))  { ret 5; }
+        val opt_project: opt[*Value] = get(?t, "project");
+        if (!sel opt_project.some)                  { ret 3; }
+        if (!span_is(opt_project.some.span, 11, 9)) { ret 4; }
+        if (!span_is(opt_project.some.key, 12, 7))  { ret 5; }
 
         # a nested key and its string literal, quotes included
-        val name: opt[*Value] = get(?t, "project.name");
-        if (!sel name.some)                  { ret 6; }
-        if (!span_is(name.some.key, 21, 4))  { ret 7; }
-        if (!span_is(name.some.span, 28, 5)) { ret 8; }
-        val mach: opt[*Value] = get(?t, "project.mach");
-        if (!sel mach.some)                  { ret 9; }
-        if (!span_is(mach.some.span, 41, 6)) { ret 10; }
+        val opt_name: opt[*Value] = get(?t, "project.name");
+        if (!sel opt_name.some)                  { ret 6; }
+        if (!span_is(opt_name.some.key, 21, 4))  { ret 7; }
+        if (!span_is(opt_name.some.span, 28, 5)) { ret 8; }
+        val opt_mach: opt[*Value] = get(?t, "project.mach");
+        if (!sel opt_mach.some)                  { ret 9; }
+        if (!span_is(opt_mach.some.span, 41, 6)) { ret 10; }
 
         # a dotted key: the implicit tables record the segment that created them,
         # the leaf its last segment and its literal
-        val deps: opt[*Value] = get(?t, "project.deps");
-        if (!sel deps.some)                  { ret 11; }
-        if (!span_is(deps.some.span, 48, 4)) { ret 12; }
-        if (!span_is(deps.some.key, 48, 4))  { ret 13; }
-        val core: opt[*Value] = get(?t, "project.deps.core");
-        if (!sel core.some)                 { ret 14; }
-        if (!span_is(core.some.key, 53, 4)) { ret 15; }
-        val version: opt[*Value] = get(?t, "project.deps.core.version");
-        if (!sel version.some)                  { ret 16; }
-        if (!span_is(version.some.key, 58, 7))  { ret 17; }
-        if (!span_is(version.some.span, 68, 1)) { ret 18; }
+        val opt_deps: opt[*Value] = get(?t, "project.deps");
+        if (!sel opt_deps.some)                  { ret 11; }
+        if (!span_is(opt_deps.some.span, 48, 4)) { ret 12; }
+        if (!span_is(opt_deps.some.key, 48, 4))  { ret 13; }
+        val opt_core: opt[*Value] = get(?t, "project.deps.core");
+        if (!sel opt_core.some)                 { ret 14; }
+        if (!span_is(opt_core.some.key, 53, 4)) { ret 15; }
+        val opt_version: opt[*Value] = get(?t, "project.deps.core.version");
+        if (!sel opt_version.some)                  { ret 16; }
+        if (!span_is(opt_version.some.key, 58, 7))  { ret 17; }
+        if (!span_is(opt_version.some.span, 68, 1)) { ret 18; }
 
         # an array literal and its elements: elements have no key
-        val targets: opt[*Value] = get(?t, "project.targets");
-        if (!sel targets.some)                   { ret 19; }
-        if (!span_is(targets.some.span, 80, 18)) { ret 20; }
-        val linux: opt[*Value] = array_get(?targets.some.data.array, 0);
-        if (!sel linux.some)                  { ret 21; }
-        if (!span_is(linux.some.span, 82, 7)) { ret 22; }
-        if (!span_is(linux.some.key, 0, 0))   { ret 23; }
-        val win: opt[*Value] = array_get(?targets.some.data.array, 1);
-        if (!sel win.some)                  { ret 24; }
-        if (!span_is(win.some.span, 91, 5)) { ret 25; }
+        val opt_targets: opt[*Value] = get(?t, "project.targets");
+        if (!sel opt_targets.some)                   { ret 19; }
+        if (!span_is(opt_targets.some.span, 80, 18)) { ret 20; }
+        val opt_linux: opt[*Value] = array_get(?opt_targets.some.data.array, 0);
+        if (!sel opt_linux.some)                  { ret 21; }
+        if (!span_is(opt_linux.some.span, 82, 7)) { ret 22; }
+        if (!span_is(opt_linux.some.key, 0, 0))   { ret 23; }
+        val opt_win: opt[*Value] = array_get(?opt_targets.some.data.array, 1);
+        if (!sel opt_win.some)                  { ret 24; }
+        if (!span_is(opt_win.some.span, 91, 5)) { ret 25; }
 
         # a quoted header segment keeps its quotes; the outer table an earlier
         # header defined is not re-stamped by being passed through
-        val quoted: *Value = find_by_seg(?project.some.data.table, "quoted key", 10);
-        if (quoted == nil)                      { ret 26; }
-        if (!span_is(quoted.span, 99, 22))      { ret 27; }
-        if (!span_is(quoted.key, 108, 12))      { ret 28; }
-        if (!span_is(project.some.span, 11, 9)) { ret 29; }
+        val quoted: *Value = find_by_seg(?opt_project.some.data.table, "quoted key", 10);
+        if (quoted == nil)                          { ret 26; }
+        if (!span_is(quoted.span, 99, 22))          { ret 27; }
+        if (!span_is(quoted.key, 108, 12))          { ret 28; }
+        if (!span_is(opt_project.some.span, 11, 9)) { ret 29; }
 
         # an inline table is the braces; its entries are positioned like any other
-        val x: opt[*Value] = get(?quoted.data.table, "x");
-        if (!sel x.some)                    { ret 30; }
-        if (!span_is(x.some.span, 126, 12)) { ret 31; }
-        val y: opt[*Value] = get(?quoted.data.table, "x.y");
-        if (!sel y.some)                   { ret 32; }
-        if (!span_is(y.some.key, 128, 1))  { ret 33; }
-        if (!span_is(y.some.span, 132, 4)) { ret 34; }
+        val opt_table_entry: opt[*Value] = get(?quoted.data.table, "x");
+        if (!sel opt_table_entry.some)                    { ret 30; }
+        if (!span_is(opt_table_entry.some.span, 126, 12)) { ret 31; }
+        val opt_x_y: opt[*Value] = get(?quoted.data.table, "x.y");
+        if (!sel opt_x_y.some)                   { ret 32; }
+        if (!span_is(opt_x_y.some.key, 128, 1))  { ret 33; }
+        if (!span_is(opt_x_y.some.span, 132, 4)) { ret 34; }
 
         # an array of tables: the array is positioned at the segment that first
         # named it, each element at the header that appended it
-        val artifact: opt[*Value] = get(?t, "artifact");
-        if (!sel artifact.some)                   { ret 35; }
-        if (!span_is(artifact.some.span, 141, 8)) { ret 36; }
-        if (!span_is(artifact.some.key, 141, 8))  { ret 37; }
-        val first: opt[*Value] = array_get(?artifact.some.data.array, 0);
-        if (!sel first.some)                    { ret 38; }
-        if (!span_is(first.some.span, 139, 12)) { ret 39; }
-        val second: opt[*Value] = array_get(?artifact.some.data.array, 1);
-        if (!sel second.some)                    { ret 40; }
-        if (!span_is(second.some.span, 165, 12)) { ret 41; }
-        if (!span_is(second.some.key, 167, 8))   { ret 42; }
-        val kind: opt[*Value] = get(?second.some.data.table, "kind");
-        if (!sel kind.some)                   { ret 43; }
-        if (!span_is(kind.some.key, 178, 4))  { ret 44; }
-        if (!span_is(kind.some.span, 185, 5)) { ret 45; }
+        val opt_artifact: opt[*Value] = get(?t, "artifact");
+        if (!sel opt_artifact.some)                   { ret 35; }
+        if (!span_is(opt_artifact.some.span, 141, 8)) { ret 36; }
+        if (!span_is(opt_artifact.some.key, 141, 8))  { ret 37; }
+        val opt_first: opt[*Value] = array_get(?opt_artifact.some.data.array, 0);
+        if (!sel opt_first.some)                    { ret 38; }
+        if (!span_is(opt_first.some.span, 139, 12)) { ret 39; }
+        val opt_second: opt[*Value] = array_get(?opt_artifact.some.data.array, 1);
+        if (!sel opt_second.some)                    { ret 40; }
+        if (!span_is(opt_second.some.span, 165, 12)) { ret 41; }
+        if (!span_is(opt_second.some.key, 167, 8))   { ret 42; }
+        val opt_kind: opt[*Value] = get(?opt_second.some.data.table, "kind");
+        if (!sel opt_kind.some)                   { ret 43; }
+        if (!span_is(opt_kind.some.key, 178, 4))  { ret 44; }
+        if (!span_is(opt_kind.some.span, 185, 5)) { ret 45; }
 
         dnit(?a, ?t);
         if (c.live != 0) { ret 46; }
@@ -804,17 +804,17 @@ $if (capability.HOSTED) {
         var a: Allocator;
         testing.counting_make(?c, ?a);
 
-        val r: res[Table, TomlError] = parse(?a, "a.b = 1\n[a]\nc = 2\n");
-        if (sel r.err) { ret 2; }
-        var t:  Table       = r.ok;
-        val av: opt[*Value] = get(?t, "a");
-        if (!sel av.some)                 { ret 3; }
-        if (!span_is(av.some.span, 8, 3)) { ret 4; }
-        if (!span_is(av.some.key, 9, 1))  { ret 5; }
-        val bv: opt[*Value] = get(?t, "a.b");
-        if (!sel bv.some)                 { ret 6; }
-        if (!span_is(bv.some.key, 2, 1))  { ret 7; }
-        if (!span_is(bv.some.span, 6, 1)) { ret 8; }
+        val res_parse: res[Table, TomlError] = parse(?a, "a.b = 1\n[a]\nc = 2\n");
+        if (sel res_parse.err) { ret 2; }
+        var t:         Table       = res_parse.ok;
+        val opt_entry: opt[*Value] = get(?t, "a");
+        if (!sel opt_entry.some)                 { ret 3; }
+        if (!span_is(opt_entry.some.span, 8, 3)) { ret 4; }
+        if (!span_is(opt_entry.some.key, 9, 1))  { ret 5; }
+        val opt_a_b: opt[*Value] = get(?t, "a.b");
+        if (!sel opt_a_b.some)                 { ret 6; }
+        if (!span_is(opt_a_b.some.key, 2, 1))  { ret 7; }
+        if (!span_is(opt_a_b.some.span, 6, 1)) { ret 8; }
 
         dnit(?a, ?t);
         if (c.live != 0) { ret 9; }

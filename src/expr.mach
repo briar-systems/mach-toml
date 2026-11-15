@@ -73,10 +73,10 @@ pub val MAX_VALUE_DEPTH: usize = 64;
 # ret:   parsed Value, or the failure
 pub fun parse_value(a: *Allocator, src: str, i: *usize, depth: usize) res[Value, TomlError] {
     skip_ws(src, i);
-    val start: usize                 = @i;
-    val r:     res[Value, TomlError] = parse_value_literal(a, src, i, depth);
-    if (sel r.err) { ret r; }
-    var v: Value = r.ok;
+    val start:                   usize                 = @i;
+    val res_parse_value_literal: res[Value, TomlError] = parse_value_literal(a, src, i, depth);
+    if (sel res_parse_value_literal.err) { ret res_parse_value_literal; }
+    var v: Value = res_parse_value_literal.ok;
     v.span = span_from(start, @i);
     ret value_ok(v);
 }
@@ -88,15 +88,15 @@ fun parse_value_literal(a: *Allocator, src: str, i: *usize, depth: usize) res[Va
     val b: u8 = src[@i];
 
     if (b == '"') {
-        val r: res[str, TomlError] = parse_basic_string(a, src, i);
-        if (sel r.err) { ret value_fail(r.err); }
-        ret value_ok(value_string(r.ok));
+        val res_parse_basic_string: res[str, TomlError] = parse_basic_string(a, src, i);
+        if (sel res_parse_basic_string.err) { ret value_fail(res_parse_basic_string.err); }
+        ret value_ok(value_string(res_parse_basic_string.ok));
     }
 
     if (b == '\'') {
-        val r: res[str, TomlError] = parse_literal_string(a, src, i);
-        if (sel r.err) { ret value_fail(r.err); }
-        ret value_ok(value_string(r.ok));
+        val res_parse_literal_string: res[str, TomlError] = parse_literal_string(a, src, i);
+        if (sel res_parse_literal_string.err) { ret value_fail(res_parse_literal_string.err); }
+        ret value_ok(value_string(res_parse_literal_string.ok));
     }
 
     if (b == 't' || b == 'f') {
@@ -138,18 +138,18 @@ fun parse_array_value(a: *Allocator, src: str, i: *usize, depth: usize) res[Valu
             brk;
         }
 
-        val vr: res[Value, TomlError] = parse_value(a, src, i, depth);
-        if (sel vr.err) {
+        val res_parse_value: res[Value, TomlError] = parse_value(a, src, i, depth);
+        if (sel res_parse_value.err) {
             array_dnit(a, ?arr);
-            ret vr;
+            ret res_parse_value;
         }
 
-        val pr: err[Error] = array_push(a, ?arr, vr.ok);
-        if (sel pr.err) {
-            var parsed: Value = vr.ok;
+        val err_array_push: err[Error] = array_push(a, ?arr, res_parse_value.ok);
+        if (sel err_array_push.err) {
+            var parsed: Value = res_parse_value.ok;
             value_dnit(a, ?parsed);
             array_dnit(a, ?arr);
-            ret value_fail(TomlError.alloc{pr.err});
+            ret value_fail(TomlError.alloc{err_array_push.err});
         }
 
         skip_ws_comments_newlines(src, i);
@@ -180,11 +180,11 @@ fun parse_inline_table(a: *Allocator, src: str, i: *usize, depth: usize) res[Val
         ret value_ok(value_table(t));
     }
 
-    val r: err[TomlError] = parse_inline_entries(a, src, i, ?t, ?ks, depth);
+    val err_parse_inline_entries: err[TomlError] = parse_inline_entries(a, src, i, ?t, ?ks, depth);
     keysegs_dnit(a, ?ks);
-    if (sel r.err) {
+    if (sel err_parse_inline_entries.err) {
         dnit(a, ?t);
-        ret value_fail(r.err);
+        ret value_fail(err_parse_inline_entries.err);
     }
     ret value_ok(value_table(t));
 }
@@ -204,30 +204,30 @@ fun parse_inline_entries(a: *Allocator, src: str, i: *usize, t: *Table, ks: *Key
         skip_ws(src, i);
 
         keysegs_dnit(a, ks);
-        val key_at: usize          = @i;
-        val ksr:    err[TomlError] = parse_key_path(a, src, i, ks);
-        if (sel ksr.err) { ret ksr; }
+        val key_at:  usize          = @i;
+        val err_ksr: err[TomlError] = parse_key_path(a, src, i, ks);
+        if (sel err_ksr.err) { ret err_ksr; }
 
         skip_ws(src, i);
         if (src[@i] != '=') { ret err[TomlError].err{TomlError.syntax{@i}}; }
         @i = @i + 1;
 
-        val vr: res[Value, TomlError] = parse_value(a, src, i, depth);
-        if (sel vr.err) { ret err[TomlError].err{vr.err}; }
+        val res_parse_value: res[Value, TomlError] = parse_value(a, src, i, depth);
+        if (sel res_parse_value.err) { ret err[TomlError].err{res_parse_value.err}; }
 
-        var parsed: Value = vr.ok;
+        var parsed: Value = res_parse_value.ok;
         parsed.key = ks.spans[ks.len - 1];
 
-        val nr: res[*Table, TomlError] = navigate_segs(a, t, ks);
-        if (sel nr.err) {
+        val res_navigate_segs: res[*Table, TomlError] = navigate_segs(a, t, ks);
+        if (sel res_navigate_segs.err) {
             value_dnit(a, ?parsed);
-            ret err[TomlError].err{at(nr.err, key_at)};
+            ret err[TomlError].err{at(res_navigate_segs.err, key_at)};
         }
 
-        val sr: err[Error] = table_set(a, nr.ok, ks.segs[ks.len - 1], parsed);
-        if (sel sr.err) {
+        val err_table_set: err[Error] = table_set(a, res_navigate_segs.ok, ks.segs[ks.len - 1], parsed);
+        if (sel err_table_set.err) {
             value_dnit(a, ?parsed);
-            ret err[TomlError].err{TomlError.alloc{sr.err}};
+            ret err[TomlError].err{TomlError.alloc{err_table_set.err}};
         }
 
         skip_ws(src, i);

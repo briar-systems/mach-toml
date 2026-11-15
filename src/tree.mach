@@ -76,20 +76,20 @@ pub fun value_dnit(a: *Allocator, v: *Value) err[Error] {
 # a:   allocator the array was parsed with
 # arr: array to tear down; reset to empty
 pub fun array_dnit(a: *Allocator, arr: *Array) err[Error] {
-    var first: err[Error] = err[Error].ok{};
-    val items: *Value     = arr.items::*Value;
-    var i:     usize      = 0;
+    var err_first: err[Error] = err[Error].ok{};
+    val items:     *Value     = arr.items::*Value;
+    var i:         usize      = 0;
     for (i < arr.len) {
-        keep_first(?first, value_dnit(a, ?items[i]));
+        keep_first(?err_first, value_dnit(a, ?items[i]));
         i = i + 1;
     }
     if (arr.items != nil && arr.cap > 0) {
-        keep_first(?first, deallocate[u8](a, arr.items::*u8, arr.cap * VALUE_SIZE));
+        keep_first(?err_first, deallocate[u8](a, arr.items::*u8, arr.cap * VALUE_SIZE));
     }
     arr.items = nil;
     arr.len   = 0;
     arr.cap   = 0;
-    ret first;
+    ret err_first;
 }
 
 # release a key-segment list: every segment string, then the segment array
@@ -101,21 +101,21 @@ pub fun array_dnit(a: *Allocator, arr: *Array) err[Error] {
 # a:  allocator the segments were parsed with
 # ks: segment list to tear down; reset to empty
 pub fun keysegs_dnit(a: *Allocator, ks: *KeySegs) err[Error] {
-    var first: err[Error] = err[Error].ok{};
-    var i:     usize      = 0;
+    var err_first: err[Error] = err[Error].ok{};
+    var i:         usize      = 0;
     for (i < ks.len) {
-        keep_first(?first, free_str(a, ks.segs[i]));
+        keep_first(?err_first, free_str(a, ks.segs[i]));
         i = i + 1;
     }
     if (ks.segs != nil && ks.cap > 0) {
-        keep_first(?first, deallocate[u8](a, ks.segs::*u8, ks.cap * 8));
-        keep_first(?first, deallocate[u8](a, ks.spans::*u8, ks.cap * SPAN_SIZE));
+        keep_first(?err_first, deallocate[u8](a, ks.segs::*u8, ks.cap * 8));
+        keep_first(?err_first, deallocate[u8](a, ks.spans::*u8, ks.cap * SPAN_SIZE));
     }
     ks.segs  = nil;
     ks.spans = nil;
     ks.len   = 0;
     ks.cap   = 0;
-    ret first;
+    ret err_first;
 }
 
 # release a parsed table and everything under it
@@ -134,26 +134,26 @@ pub fun keysegs_dnit(a: *Allocator, ks: *KeySegs) err[Error] {
 # t:   table to tear down
 # ret: ok, or the first refusal the allocator reported
 pub fun dnit(a: *Allocator, t: *Table) err[Error] {
-    var first: err[Error] = err[Error].ok{};
-    val keys:  *str       = t.keys::*str;
-    val vals:  *Value     = t.values::*Value;
-    var i:     usize      = 0;
+    var err_first: err[Error] = err[Error].ok{};
+    val keys:      *str       = t.keys::*str;
+    val vals:      *Value     = t.values::*Value;
+    var i:         usize      = 0;
     for (i < t.len) {
-        keep_first(?first, free_str(a, keys[i]));
-        keep_first(?first, value_dnit(a, ?vals[i]));
+        keep_first(?err_first, free_str(a, keys[i]));
+        keep_first(?err_first, value_dnit(a, ?vals[i]));
         i = i + 1;
     }
     if (t.keys != nil && t.cap > 0) {
-        keep_first(?first, deallocate[u8](a, t.keys::*u8, t.cap * 8));
+        keep_first(?err_first, deallocate[u8](a, t.keys::*u8, t.cap * 8));
     }
     if (t.values != nil && t.cap > 0) {
-        keep_first(?first, deallocate[u8](a, t.values::*u8, t.cap * VALUE_SIZE));
+        keep_first(?err_first, deallocate[u8](a, t.values::*u8, t.cap * VALUE_SIZE));
     }
     t.keys   = nil;
     t.values = nil;
     t.len    = 0;
     t.cap    = 0;
-    ret first;
+    ret err_first;
 }
 
 # insert or overwrite a key-value pair in a table
@@ -184,9 +184,9 @@ pub fun table_set(a: *Allocator, t: *Table, key: str, val_: Value) err[Error] {
     # the table owns its keys, so it stores a copy rather than adopting the
     # caller's string. one rule for every insert path: the caller frees what it
     # passed, whether or not the key was already present
-    val kd: res[str, Error] = alloc_str(a, key, 0, str_len(key));
-    if (sel kd.err) { ret err[Error].err{kd.err}; }
-    val owned_key: str = kd.ok;
+    val res_alloc_str: res[str, Error] = alloc_str(a, key, 0, str_len(key));
+    if (sel res_alloc_str.err) { ret err[Error].err{res_alloc_str.err}; }
+    val owned_key: str = res_alloc_str.ok;
 
     # grow parallel arrays if at capacity
     if (t.len >= t.cap) {
@@ -197,20 +197,20 @@ pub fun table_set(a: *Allocator, t: *Table, key: str, val_: Value) err[Error] {
             ret err[Error].err{Error.overflow{}};
         }
 
-        val kr: res[*u8, Error] = allocate[u8](a, new_cap * 8);
-        if (sel kr.err) {
+        val res_allocate: res[*u8, Error] = allocate[u8](a, new_cap * 8);
+        if (sel res_allocate.err) {
             free_str(a, owned_key);
-            ret err[Error].err{kr.err};
+            ret err[Error].err{res_allocate.err};
         }
-        val new_keys: *str = kr.ok::*str;
+        val new_keys: *str = res_allocate.ok::*str;
 
-        val vr: res[*u8, Error] = allocate[u8](a, new_cap * VALUE_SIZE);
-        if (sel vr.err) {
+        val res_value: res[*u8, Error] = allocate[u8](a, new_cap * VALUE_SIZE);
+        if (sel res_value.err) {
             deallocate[u8](a, new_keys::*u8, new_cap * 8);
             free_str(a, owned_key);
-            ret err[Error].err{vr.err};
+            ret err[Error].err{res_value.err};
         }
-        val new_vals: *Value = vr.ok::*Value;
+        val new_vals: *Value = res_value.ok::*Value;
 
         if (t.len > 0) {
             memory.raw_copy(new_keys::ptr, t.keys, t.len * 8);
@@ -258,8 +258,8 @@ pub fun table_ensure_subtable(a: *Allocator, t: *Table, key: str, tok: Span) res
     var empty: Value = value_table(table_make());
     empty.span = tok;
     empty.key  = tok;
-    val sr: err[Error] = table_set(a, t, key, empty);
-    if (sel sr.err) { ret res[*Value, TomlError].err{TomlError.alloc{sr.err}}; }
+    val err_table_set: err[Error] = table_set(a, t, key, empty);
+    if (sel err_table_set.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_table_set.err}}; }
     ret res[*Value, TomlError].ok{table_find(t, key)};
 }
 
@@ -277,9 +277,9 @@ pub fun array_push(a: *Allocator, arr: *Array, val_: Value) err[Error] {
         if (arr.cap == 0)      { new_cap = 4; }
         or (new_cap < arr.cap) { ret err[Error].err{Error.overflow{}}; }
 
-        val r: res[*u8, Error] = allocate[u8](a, new_cap * VALUE_SIZE);
-        if (sel r.err) { ret err[Error].err{r.err}; }
-        val new_items: *Value = r.ok::*Value;
+        val res_allocate: res[*u8, Error] = allocate[u8](a, new_cap * VALUE_SIZE);
+        if (sel res_allocate.err) { ret err[Error].err{res_allocate.err}; }
+        val new_items: *Value = res_allocate.ok::*Value;
 
         if (arr.len > 0) {
             memory.raw_copy(new_items::ptr, arr.items, arr.len * VALUE_SIZE);
@@ -321,16 +321,16 @@ pub fun keysegs_push(a: *Allocator, ks: *KeySegs, seg: str, span: Span) err[Erro
         if (ks.cap == 0)      { new_cap = 4; }
         or (new_cap < ks.cap) { ret err[Error].err{Error.overflow{}}; }
 
-        val r: res[*u8, Error] = allocate[u8](a, new_cap * 8);
-        if (sel r.err) { ret err[Error].err{r.err}; }
-        val new_segs: *str = r.ok::*str;
+        val res_allocate: res[*u8, Error] = allocate[u8](a, new_cap * 8);
+        if (sel res_allocate.err) { ret err[Error].err{res_allocate.err}; }
+        val new_segs: *str = res_allocate.ok::*str;
 
-        val sr: res[*u8, Error] = allocate[u8](a, new_cap * SPAN_SIZE);
-        if (sel sr.err) {
+        val res_span: res[*u8, Error] = allocate[u8](a, new_cap * SPAN_SIZE);
+        if (sel res_span.err) {
             deallocate[u8](a, new_segs::*u8, new_cap * 8);
-            ret err[Error].err{sr.err};
+            ret err[Error].err{res_span.err};
         }
-        val new_spans: *Span = sr.ok::*Span;
+        val new_spans: *Span = res_span.ok::*Span;
 
         if (ks.len > 0) {
             memory.raw_copy(new_segs::ptr, ks.segs::ptr, ks.len * 8);

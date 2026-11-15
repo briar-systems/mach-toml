@@ -37,9 +37,9 @@ pub fun escape(a: *Allocator, s: str) res[str, Error] {
         cap = cap + width;
         i   = i + 1;
     }
-    val r: res[*u8, Error] = allocate[u8](a, cap);
-    if (sel r.err) { ret res[str, Error].err{r.err}; }
-    val buf: *u8   = r.ok;
+    val res_allocate: res[*u8, Error] = allocate[u8](a, cap);
+    if (sel res_allocate.err) { ret res[str, Error].err{res_allocate.err}; }
+    val buf: *u8   = res_allocate.ok;
     var k:   usize = 0;
     i = 0;
     for (i < n) {
@@ -97,18 +97,18 @@ $if (capability.HOSTED) {
     test toml__escape_parses_back {
         var a: Allocator;
         page.make(?a);
-        val value: str             = "q\"b\\n\nt\tc\x01d\x7f";
-        val e:     res[str, Error] = escape(?a, value);
-        if (sel e.err)                                               { ret 1; }
-        if (!str_equals(e.ok, "q\\\"b\\\\n\\nt\\tc\\u0001d\\u007f")) { ret 2; }
-        val doc: res[str, std_format.FormatError] = std_format.sprint(?a, "v = \"{}\"\n", e.ok);
-        if (sel doc.err) { ret 3; }
-        val r: res[Table, TomlError] = parse(?a, doc.ok);
-        if (sel r.err) { ret 4; }
-        var t:   Table    = r.ok;
-        val got: opt[str] = get_str(?t, "v");
-        if (!sel got.some)                { ret 5; }
-        if (!str_equals(got.some, value)) { ret 6; }
+        val value:      str             = "q\"b\\n\nt\tc\x01d\x7f";
+        val res_escape: res[str, Error] = escape(?a, value);
+        if (sel res_escape.err)                                               { ret 1; }
+        if (!str_equals(res_escape.ok, "q\\\"b\\\\n\\nt\\tc\\u0001d\\u007f")) { ret 2; }
+        val res_doc: res[str, std_format.FormatError] = std_format.sprint(?a, "v = \"{}\"\n", res_escape.ok);
+        if (sel res_doc.err) { ret 3; }
+        val res_parse: res[Table, TomlError] = parse(?a, res_doc.ok);
+        if (sel res_parse.err) { ret 4; }
+        var t:       Table    = res_parse.ok;
+        val opt_str: opt[str] = get_str(?t, "v");
+        if (!sel opt_str.some)                { ret 5; }
+        if (!str_equals(opt_str.some, value)) { ret 6; }
         ret 0;
     }
 }

@@ -23,9 +23,9 @@ use toml.scan.is_ws_or_newline;
 # len:   number of bytes to copy
 # ret:   null-terminated copy, or the allocator's refusal
 pub fun alloc_str(a: *Allocator, src: str, start: usize, len: usize) res[str, Error] {
-    val r: res[*u8, Error] = allocate[u8](a, len + 1);
-    if (sel r.err) { ret res[str, Error].err{r.err}; }
-    val buf: *u8 = r.ok;
+    val res_allocate: res[*u8, Error] = allocate[u8](a, len + 1);
+    if (sel res_allocate.err) { ret res[str, Error].err{res_allocate.err}; }
+    val buf: *u8 = res_allocate.ok;
     memory.raw_copy(buf::ptr, (src::usize + start)::ptr, len);
     buf[len] = 0;
     ret res[str, Error].ok{buf::*u8};
@@ -205,9 +205,9 @@ pub fun parse_basic_string(a: *Allocator, src: str, i: *usize) res[str, TomlErro
         @i      = @i + 1;
     }
 
-    val r: res[*u8, Error] = allocate[u8](a, out_len + 1);
-    if (sel r.err) { ret text_alloc(r.err); }
-    val buf: *u8 = r.ok;
+    val res_allocate: res[*u8, Error] = allocate[u8](a, out_len + 1);
+    if (sel res_allocate.err) { ret text_alloc(res_allocate.err); }
+    val buf: *u8 = res_allocate.ok;
 
     # pass 2: copy with escape processing
     var si: usize = start;
@@ -269,9 +269,9 @@ fun parse_ml_basic_string(a: *Allocator, src: str, i: *usize) res[str, TomlError
         @i      = @i + 1;
     }
 
-    val r: res[*u8, Error] = allocate[u8](a, out_len + 1);
-    if (sel r.err) { ret text_alloc(r.err); }
-    val buf: *u8 = r.ok;
+    val res_allocate: res[*u8, Error] = allocate[u8](a, out_len + 1);
+    if (sel res_allocate.err) { ret text_alloc(res_allocate.err); }
+    val buf: *u8 = res_allocate.ok;
 
     # pass 2: copy with escape processing
     var si: usize = start;
@@ -326,9 +326,9 @@ pub fun parse_literal_string(a: *Allocator, src: str, i: *usize) res[str, TomlEr
 
     val len: usize = @i - start;
     @i = @i + 1;
-    val copied: res[str, Error] = alloc_str(a, src, start, len);
-    if (sel copied.err) { ret text_alloc(copied.err); }
-    ret res[str, TomlError].ok{copied.ok};
+    val res_copied: res[str, Error] = alloc_str(a, src, start, len);
+    if (sel res_copied.err) { ret text_alloc(res_copied.err); }
+    ret res[str, TomlError].ok{res_copied.ok};
 }
 
 # parse a triple-quoted literal string
@@ -351,7 +351,7 @@ fun parse_ml_literal_string(a: *Allocator, src: str, i: *usize) res[str, TomlErr
 
     val len: usize = @i - start;
     @i = @i + 3;
-    val copied: res[str, Error] = alloc_str(a, src, start, len);
-    if (sel copied.err) { ret text_alloc(copied.err); }
-    ret res[str, TomlError].ok{copied.ok};
+    val res_copied: res[str, Error] = alloc_str(a, src, start, len);
+    if (sel res_copied.err) { ret text_alloc(res_copied.err); }
+    ret res[str, TomlError].ok{res_copied.ok};
 }

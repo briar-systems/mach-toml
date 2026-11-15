@@ -40,9 +40,9 @@ fun parse_key_segment(a: *Allocator, src: str, i: *usize) res[str, TomlError] {
         @i = @i + 1;
     }
     if (@i == start) { ret text_fail(TomlError.syntax{@i}); }
-    val copied: res[str, Error] = alloc_str(a, src, start, @i - start);
-    if (sel copied.err) { ret text_alloc(copied.err); }
-    ret res[str, TomlError].ok{copied.ok};
+    val res_copied: res[str, Error] = alloc_str(a, src, start, @i - start);
+    if (sel res_copied.err) { ret text_alloc(res_copied.err); }
+    ret res[str, TomlError].ok{res_copied.ok};
 }
 
 # parse a possibly-dotted key into segments
@@ -58,26 +58,26 @@ fun parse_key_segment(a: *Allocator, src: str, i: *usize) res[str, TomlError] {
 # ks:  the segment list to fill, empty on entry
 # ret: ok, or the failure
 pub fun parse_key_path(a: *Allocator, src: str, i: *usize, ks: *KeySegs) err[TomlError] {
-    val first_at: usize               = @i;
-    val first:    res[str, TomlError] = parse_key_segment(a, src, i);
-    if (sel first.err) { ret err[TomlError].err{first.err}; }
+    val first_at:  usize               = @i;
+    val res_first: res[str, TomlError] = parse_key_segment(a, src, i);
+    if (sel res_first.err) { ret err[TomlError].err{res_first.err}; }
 
-    val pr: err[Error] = keysegs_push(a, ks, first.ok, span_from(first_at, @i));
-    if (sel pr.err) {
-        free_str(a, first.ok);
-        ret err[TomlError].err{TomlError.alloc{pr.err}};
+    val err_keysegs_push: err[Error] = keysegs_push(a, ks, res_first.ok, span_from(first_at, @i));
+    if (sel err_keysegs_push.err) {
+        free_str(a, res_first.ok);
+        ret err[TomlError].err{TomlError.alloc{err_keysegs_push.err}};
     }
 
     for (src[@i] == '.') {
         @i = @i + 1;
-        val seg_at: usize               = @i;
-        val seg:    res[str, TomlError] = parse_key_segment(a, src, i);
-        if (sel seg.err) { ret err[TomlError].err{seg.err}; }
+        val seg_at:  usize               = @i;
+        val res_seg: res[str, TomlError] = parse_key_segment(a, src, i);
+        if (sel res_seg.err) { ret err[TomlError].err{res_seg.err}; }
 
-        val pr2: err[Error] = keysegs_push(a, ks, seg.ok, span_from(seg_at, @i));
-        if (sel pr2.err) {
-            free_str(a, seg.ok);
-            ret err[TomlError].err{TomlError.alloc{pr2.err}};
+        val err_keysegs_push: err[Error] = keysegs_push(a, ks, res_seg.ok, span_from(seg_at, @i));
+        if (sel err_keysegs_push.err) {
+            free_str(a, res_seg.ok);
+            ret err[TomlError].err{TomlError.alloc{err_keysegs_push.err}};
         }
     }
 
@@ -95,9 +95,9 @@ pub fun navigate_segs(a: *Allocator, t: *Table, ks: *KeySegs) res[*Table, TomlEr
     var current: *Table = t;
     var i:       usize  = 0;
     for (i < ks.len - 1) {
-        val tr: res[*Value, TomlError] = table_ensure_subtable(a, current, ks.segs[i], ks.spans[i]);
-        if (sel tr.err) { ret res[*Table, TomlError].err{tr.err}; }
-        current = ?tr.ok.data.table;
+        val res_table_ensure_subtable: res[*Value, TomlError] = table_ensure_subtable(a, current, ks.segs[i], ks.spans[i]);
+        if (sel res_table_ensure_subtable.err) { ret res[*Table, TomlError].err{res_table_ensure_subtable.err}; }
+        current = ?res_table_ensure_subtable.ok.data.table;
         i       = i + 1;
     }
     ret res[*Table, TomlError].ok{current};
