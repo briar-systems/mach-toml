@@ -366,6 +366,104 @@ $if (capability.HOSTED) {
         ret 0;
     }
 
+    # whether table `t` holds the integer `want` at `key`
+    #[testing]
+    fun int_at(t: *Table, key: str, want: i64) bool {
+        val opt_int: opt[i64] = get_int(t, key);
+        ret sel opt_int.some && opt_int.some == want;
+    }
+
+    # whether table `t` holds a float with the bit pattern `want` at `key`
+    #[testing]
+    fun float_bits_at(t: *Table, key: str, want: u64) bool {
+        val opt_float: opt[f64] = get_float(t, key);
+        ret sel opt_float.some && (opt_float.some:~u64) == want;
+    }
+
+    # whether document `doc` is refused with an overflow at offset `at_`
+    #[testing]
+    fun overflow_at(a: *Allocator, doc: str, at_: usize) bool {
+        val res_parse: res[Table, TomlError] = parse(a, doc);
+        if (sel res_parse.ok) {
+            var t: Table = res_parse.ok;
+            dnit(a, ?t);
+            ret false;
+        }
+        ret sel res_parse.err.overflow && res_parse.err.overflow == at_;
+    }
+
+    # whether document `doc` is refused with a syntax error at offset `at_`
+    #[testing]
+    fun syntax_at(a: *Allocator, doc: str, at_: usize) bool {
+        val res_parse: res[Table, TomlError] = parse(a, doc);
+        if (sel res_parse.ok) {
+            var t: Table = res_parse.ok;
+            dnit(a, ?t);
+            ret false;
+        }
+        ret sel res_parse.err.syntax && res_parse.err.syntax == at_;
+    }
+
+    # hex, octal and binary integers with underscores, a signed decimal, inf and
+    # nan with each sign; each prefixed base refuses one digit past 64 bits and
+    # a prefix with no digits
+    test toml__integer_bases_and_special_floats {
+        var a: Allocator;
+        page.make(?a);
+        val res_parse: res[Table, TomlError] = parse(?a, "h = 0xDEAD_beef\no = 0o7_55\nb = 0b1_101\nd = -1_000\np = +17\ni = inf\nn = -inf\nq = nan\nm = -nan\n");
+        if (sel res_parse.err) { ret 1; }
+        var t: Table = res_parse.ok;
+        fin { dnit(?a, ?t); }
+
+        if (!int_at(?t, "h", 3735928559))                { ret 2; }
+        if (!int_at(?t, "o", 493))                       { ret 3; }
+        if (!int_at(?t, "b", 13))                        { ret 4; }
+        if (!int_at(?t, "d", -1000))                     { ret 5; }
+        if (!int_at(?t, "p", 17))                        { ret 6; }
+        if (!float_bits_at(?t, "i", 0x7FF0000000000000)) { ret 7; }
+        if (!float_bits_at(?t, "n", 0xFFF0000000000000)) { ret 8; }
+        if (!float_bits_at(?t, "q", 0x7FF8000000000000)) { ret 9; }
+        if (!float_bits_at(?t, "m", 0xFFF8000000000000)) { ret 10; }
+
+        if (!overflow_at(?a, "x = 0x1_0000_0000_0000_0000\n", 4))         { ret 11; }
+        if (!overflow_at(?a, "x = 0o2_000_000_000_000_000_000_000\n", 4)) { ret 12; }
+
+        if (!overflow_at(?a, "x = 0b10000000000000000000000000000000000000000000000000000000000000000\n", 4)) { ret 13; }
+
+        if (!syntax_at(?a, "x = 0x\n", 6)) { ret 14; }
+        if (!syntax_at(?a, "x = 0o\n", 6)) { ret 15; }
+        if (!syntax_at(?a, "x = 0b\n", 6)) { ret 16; }
+        ret 0;
+    }
+
+    # \u and \U escapes encode to one, two, three and four utf-8 bytes, and a bad
+    # hex digit or a surrogate is refused at the escape letter; a multi-line basic
+    # string drops its first newline and a line-ending backslash with the
+    # whitespace after it, a multi-line literal string drops its first newline
+    # and keeps a backslash as text
+    test toml__string_escapes_and_multi_line_bodies {
+        var a: Allocator;
+        page.make(?a);
+        val res_parse: res[Table, TomlError] = parse(?a, "u = \"\\u0041\\u00e9\\u20AC\\U0001F600\"\nb = \"\"\"\nab \\\n    cd\"\"\"\nl = '''\r\na\\b\n'''\n");
+        if (sel res_parse.err) { ret 1; }
+        var t: Table = res_parse.ok;
+        fin { dnit(?a, ?t); }
+
+        val opt_u: opt[str] = get_str(?t, "u");
+        if (!sel opt_u.some)                                                  { ret 2; }
+        if (!str_equals(opt_u.some, "A\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80")) { ret 3; }
+        val opt_b: opt[str] = get_str(?t, "b");
+        if (!sel opt_b.some)                  { ret 4; }
+        if (!str_equals(opt_b.some, "ab cd")) { ret 5; }
+        val opt_l: opt[str] = get_str(?t, "l");
+        if (!sel opt_l.some)                   { ret 6; }
+        if (!str_equals(opt_l.some, "a\\b\n")) { ret 7; }
+
+        if (!syntax_at(?a, "s = \"\\u12x4\"\n", 6)) { ret 8; }
+        if (!syntax_at(?a, "s = \"\\uD800\"\n", 6)) { ret 9; }
+        ret 0;
+    }
+
     # teardown tests (#474). `parse` allocates the whole tree from the caller's
     # allocator and `dnit` is its pairing, so the property worth asserting is a
     # BALANCE rather than any particular call: a parse followed by a teardown must
@@ -489,9 +587,10 @@ $if (capability.HOSTED) {
         if (!conflict_at(?a, "a = { x = 1 }\na.y = \"z\"\n", 14))                       { ret 8; }
         if (!conflict_at(?a, "a = []\n[[a]]\n", 9))                                     { ret 9; }
         if (!conflict_at(?a, "[[a]]\n[a]\n", 7))                                        { ret 10; }
+        if (!conflict_at(?a, "a = { x = 1 }\n[a.b]\n", 15))                             { ret 11; }
 
         val res_parse: res[Table, TomlError] = parse(?a, "[fruit]\napple.color = 1\n[fruit.apple.texture]\n[[f]]\n[f.p]\nx = 1\n[[f]]\n[f.p]\nx = 2\n");
-        if (sel res_parse.err) { ret 11; }
+        if (sel res_parse.err) { ret 12; }
         var t:      Table       = res_parse.ok;
         var second: i64         = 0;
         val opt_f:  opt[*Array] = get_array(?t, "f");
@@ -503,8 +602,8 @@ $if (capability.HOSTED) {
             }
         }
         dnit(?a, ?t);
-        if (second != 2) { ret 12; }
-        if (c.live != 0) { ret 13; }
+        if (second != 2) { ret 13; }
+        if (c.live != 0) { ret 14; }
         ret 0;
     }
 
