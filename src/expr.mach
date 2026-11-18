@@ -10,7 +10,7 @@ use std.types.size.usize;
 use std.types.string.str;
 use toml.error.TomlError;
 use toml.error.at;
-use toml.key.navigate_segs;
+use toml.key.define_key;
 use toml.key.parse_key_path;
 use toml.number.parse_number;
 use toml.scan.is_value_term;
@@ -24,9 +24,9 @@ use toml.tree.array_push;
 use toml.tree.dnit;
 use toml.tree.keysegs_dnit;
 use toml.tree.keysegs_init;
-use toml.tree.table_set;
 use toml.tree.value_dnit;
 use toml.value.Array;
+use toml.value.ORIGIN_LITERAL;
 use toml.value.Table;
 use toml.value.Value;
 use toml.value.array_init;
@@ -65,6 +65,8 @@ fun parse_bool_val(src: str, i: *usize) res[Value, TomlError] {
 pub val MAX_VALUE_DEPTH: usize = 64;
 
 # parse a TOML value at the current position, recording its literal's span
+#
+# a value written as a literal is closed: nothing outside it may extend it
 # ---
 # a:     allocator
 # src:   source text
@@ -77,7 +79,8 @@ pub fun parse_value(a: *Allocator, src: str, i: *usize, depth: usize) res[Value,
     val res_parse_value_literal: res[Value, TomlError] = parse_value_literal(a, src, i, depth);
     if (sel res_parse_value_literal.err) { ret res_parse_value_literal; }
     var v: Value = res_parse_value_literal.ok;
-    v.span = span_from(start, @i);
+    v.origin = ORIGIN_LITERAL;
+    v.span   = span_from(start, @i);
     ret value_ok(v);
 }
 
@@ -218,16 +221,10 @@ fun parse_inline_entries(a: *Allocator, src: str, i: *usize, t: *Table, ks: *Key
         var parsed: Value = res_parse_value.ok;
         parsed.key = ks.spans[ks.len - 1];
 
-        val res_navigate_segs: res[*Table, TomlError] = navigate_segs(a, t, ks);
-        if (sel res_navigate_segs.err) {
+        val err_define_key: err[TomlError] = define_key(a, t, ks, parsed);
+        if (sel err_define_key.err) {
             value_dnit(a, ?parsed);
-            ret err[TomlError].err{at(res_navigate_segs.err, key_at)};
-        }
-
-        val err_table_set: err[Error] = table_set(a, res_navigate_segs.ok, ks.segs[ks.len - 1], parsed);
-        if (sel err_table_set.err) {
-            value_dnit(a, ?parsed);
-            ret err[TomlError].err{TomlError.alloc{err_table_set.err}};
+            ret err[TomlError].err{at(err_define_key.err, key_at)};
         }
 
         skip_ws(src, i);

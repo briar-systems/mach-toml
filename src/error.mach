@@ -8,9 +8,10 @@ use std.types.size.usize;
 # syntax:   the byte at the payload offset is not valid TOML
 # overflow: an integer literal at the payload offset does not fit i64
 # depth:    a value at the payload offset nests deeper than MAX_VALUE_DEPTH
-# conflict: the key at the payload offset collides with an existing value of
-#           another shape (a table where a scalar was set, an array of tables
-#           over a table, and the like)
+# conflict: the key at the payload offset defines again what is already
+#           defined (a repeated key or table header, a dotted key or header
+#           reaching into a table already defined or written inline, an array
+#           of tables over a table or a literal array, and the like)
 # nul:      a NUL byte at the payload offset, written raw or as a `\u0000` or
 #           `\U00000000` escape; a parsed string cannot carry one
 # alloc:    an acquisition was refused; nothing the parse built survives

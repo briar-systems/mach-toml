@@ -13,7 +13,7 @@ use std.types.string.str;
 use toml.error.TomlError;
 use toml.error.at;
 use toml.expr.parse_value;
-use toml.key.navigate_segs;
+use toml.key.define_key;
 use toml.key.parse_key_path;
 use toml.lookup.table_find;
 use toml.scan.skip_to_newline;
@@ -25,10 +25,13 @@ use toml.tree.array_push;
 use toml.tree.dnit;
 use toml.tree.keysegs_dnit;
 use toml.tree.keysegs_init;
-use toml.tree.table_ensure_subtable;
-use toml.tree.table_set;
+use toml.tree.table_add_subtable;
+use toml.tree.table_insert;
 use toml.tree.value_dnit;
 use toml.value.Array;
+use toml.value.ORIGIN_DEFINED;
+use toml.value.ORIGIN_IMPLICIT;
+use toml.value.ORIGIN_LITERAL;
 use toml.value.TYPE_ARRAY;
 use toml.value.TYPE_TABLE;
 use toml.value.Table;
@@ -66,11 +69,67 @@ $if (capability.HOSTED) {
     use toml.value.TYPE_STRING;
 }
 
+# walk a header's inner segment, creating the table when it is missing
+#
+# a header passes through any table but a literal, and through an array of
+# tables into its last element
+# ---
+# a:      allocator
+# parent: the table holding the segment
+# ks:     the header's key segments
+# si:     which segment
+# ret:    the table the segment names, or the failure (a conflict unpositioned)
+fun header_enter(a: *Allocator, parent: *Table, ks: *KeySegs, si: usize) res[*Table, TomlError] {
+    val existing: *Value = table_find(parent, ks.segs[si]);
+    if (existing == nil) {
+        val res_table_add_subtable: res[*Value, TomlError] = table_add_subtable(a, parent, ks.segs[si], ks.spans[si], ORIGIN_IMPLICIT);
+        if (sel res_table_add_subtable.err) { ret res[*Table, TomlError].err{res_table_add_subtable.err}; }
+        ret res[*Table, TomlError].ok{?res_table_add_subtable.ok.data.table};
+    }
+    if (existing.origin == ORIGIN_LITERAL) { ret res[*Table, TomlError].err{TomlError.conflict{0}}; }
+    if (existing.tag == TYPE_TABLE)        { ret res[*Table, TomlError].ok{?existing.data.table}; }
+    if (existing.tag == TYPE_ARRAY && existing.data.array.len > 0) {
+        # navigate into last element of array (per TOML spec)
+        val items: *Value = existing.data.array.items::*Value;
+        val last:  *Value = ?items[existing.data.array.len - 1];
+        if (last.tag != TYPE_TABLE) { ret res[*Table, TomlError].err{TomlError.conflict{0}}; }
+        ret res[*Table, TomlError].ok{?last.data.table};
+    }
+    ret res[*Table, TomlError].err{TomlError.conflict{0}};
+}
+
+# resolve a [table] header
+#
+# the inner segments are walked; the last names a table no header or dotted
+# key has defined, or a new one
+# ---
+# a:    allocator
+# root: document root table
+# ks:   key segments from the [...] header
+# ret:  the table's value, its span still the caller's to stamp, or the
+#       failure (a conflict unpositioned)
+fun navigate_for_table(a: *Allocator, root: *Table, ks: *KeySegs) res[*Value, TomlError] {
+    var parent: *Table = root;
+    var si:     usize  = 0;
+    for (si < ks.len - 1) {
+        val res_header_enter: res[*Table, TomlError] = header_enter(a, parent, ks, si);
+        if (sel res_header_enter.err) { ret res[*Value, TomlError].err{res_header_enter.err}; }
+        parent = res_header_enter.ok;
+        si     = si + 1;
+    }
+
+    val existing: *Value = table_find(parent, ks.segs[si]);
+    if (existing == nil)                                                  { ret table_add_subtable(a, parent, ks.segs[si], ks.spans[si], ORIGIN_DEFINED); }
+    if (existing.tag != TYPE_TABLE || existing.origin != ORIGIN_IMPLICIT) { ret res[*Value, TomlError].err{TomlError.conflict{0}}; }
+    existing.origin = ORIGIN_DEFINED;
+    ret res[*Value, TomlError].ok{existing};
+}
+
 # resolve a [[key]] header
 #
-# navigates parent segments (creating tables or following existing
-# array-of-tables entries), then appends a new table to the array
-# at the final segment.
+# the inner segments are walked as a [table] header walks them, then a new table
+# is appended to the array of tables at the final segment, which an earlier
+# [[key]] header made or this one makes
 # ---
 # a:    allocator
 # root: document root table
@@ -79,46 +138,25 @@ $if (capability.HOSTED) {
 #       stamp, or the failure (a conflict unpositioned)
 fun navigate_for_array_table(a: *Allocator, root: *Table, ks: *KeySegs) res[*Value, TomlError] {
     var parent: *Table = root;
-    var i:      usize  = 0;
-
-    # navigate parent segments
-    for (i < ks.len - 1) {
-        val existing: *Value = table_find(parent, ks.segs[i]);
-        if (existing != nil) {
-            if (existing.tag == TYPE_TABLE) {
-                parent = ?existing.data.table;
-            }
-            or (existing.tag == TYPE_ARRAY && existing.data.array.len > 0) {
-                # navigate into last element of array (per TOML spec)
-                val items: *Value = existing.data.array.items::*Value;
-                val last:  *Value = ?items[existing.data.array.len - 1];
-                if (last.tag != TYPE_TABLE) {
-                    ret res[*Value, TomlError].err{TomlError.conflict{0}};
-                }
-                parent = ?last.data.table;
-            }
-            or {
-                ret res[*Value, TomlError].err{TomlError.conflict{0}};
-            }
-        }
-        or {
-            val res_table_ensure_subtable: res[*Value, TomlError] = table_ensure_subtable(a, parent, ks.segs[i], ks.spans[i]);
-            if (sel res_table_ensure_subtable.err) { ret res_table_ensure_subtable; }
-            parent = ?res_table_ensure_subtable.ok.data.table;
-        }
-        i = i + 1;
+    var si:     usize  = 0;
+    for (si < ks.len - 1) {
+        val res_header_enter: res[*Table, TomlError] = header_enter(a, parent, ks, si);
+        if (sel res_header_enter.err) { ret res[*Value, TomlError].err{res_header_enter.err}; }
+        parent = res_header_enter.ok;
+        si     = si + 1;
     }
 
     # append new table to the array at the final segment
     val final_key: str    = ks.segs[ks.len - 1];
     val existing:  *Value = table_find(parent, final_key);
+    var new_val:   Value  = value_table(table_init());
+    new_val.origin = ORIGIN_DEFINED;
 
     if (existing != nil) {
-        if (existing.tag != TYPE_ARRAY) {
+        # a literal array is never appended to, even an empty one
+        if (existing.tag != TYPE_ARRAY || existing.origin != ORIGIN_DEFINED) {
             ret res[*Value, TomlError].err{TomlError.conflict{0}};
         }
-        var new_table:      Table      = table_init();
-        val new_val:        Value      = value_table(new_table);
         val err_array_push: err[Error] = array_push(a, ?existing.data.array, new_val);
         if (sel err_array_push.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_array_push.err}}; }
 
@@ -128,19 +166,18 @@ fun navigate_for_array_table(a: *Allocator, root: *Table, ks: *KeySegs) res[*Val
 
     # first occurrence: create the array with one empty table
     var arr:            Array      = array_init();
-    var new_table:      Table      = table_init();
-    val new_val:        Value      = value_table(new_table);
     val err_array_push: err[Error] = array_push(a, ?arr, new_val);
     if (sel err_array_push.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_array_push.err}}; }
 
     # the array itself is positioned at the header that first named it
     var arr_val: Value = value_array(arr);
-    arr_val.span = ks.spans[ks.len - 1];
-    arr_val.key  = ks.spans[ks.len - 1];
-    val err_table_set: err[Error] = table_set(a, parent, final_key, arr_val);
-    if (sel err_table_set.err) {
+    arr_val.origin = ORIGIN_DEFINED;
+    arr_val.span   = ks.spans[ks.len - 1];
+    arr_val.key    = ks.spans[ks.len - 1];
+    val err_table_insert: err[Error] = table_insert(a, parent, final_key, arr_val);
+    if (sel err_table_insert.err) {
         array_dnit(a, ?arr);
-        ret res[*Value, TomlError].err{TomlError.alloc{err_table_set.err}};
+        ret res[*Value, TomlError].err{TomlError.alloc{err_table_insert.err}};
     }
 
     val added: *Value = table_find(parent, final_key);
@@ -263,20 +300,12 @@ fun parse_walk(a: *Allocator, src: str, root: *Table, ks: *KeySegs) err[TomlErro
 
             # inner segments record the token that created them; the table the
             # header defines records the header, whether the header created it
-            # or a dotted key or deeper header reached it first
-            var target: *Table = root;
-            var si:     usize  = 0;
-            for (si < ks.len) {
-                val res_table_ensure_subtable: res[*Value, TomlError] = table_ensure_subtable(a, target, ks.segs[si], ks.spans[si]);
-                if (sel res_table_ensure_subtable.err) { ret err[TomlError].err{at(res_table_ensure_subtable.err, key_at)}; }
-                if (si == ks.len - 1) {
-                    res_table_ensure_subtable.ok.span = span_from(header_at, i);
-                    res_table_ensure_subtable.ok.key  = ks.spans[si];
-                }
-                target = ?res_table_ensure_subtable.ok.data.table;
-                si     = si + 1;
-            }
-            current = target;
+            # or a deeper header reached it first
+            val res_navigate_for_table: res[*Value, TomlError] = navigate_for_table(a, root, ks);
+            if (sel res_navigate_for_table.err) { ret err[TomlError].err{at(res_navigate_for_table.err, key_at)}; }
+            res_navigate_for_table.ok.span = span_from(header_at, i);
+            res_navigate_for_table.ok.key  = ks.spans[ks.len - 1];
+            current                        = ?res_navigate_for_table.ok.data.table;
 
             skip_to_newline(src, ?i);
             cnt;
@@ -300,16 +329,10 @@ fun parse_walk(a: *Allocator, src: str, root: *Table, ks: *KeySegs) err[TomlErro
         var parsed: Value = res_parse_value.ok;
         parsed.key = ks.spans[ks.len - 1];
 
-        val res_navigate_segs: res[*Table, TomlError] = navigate_segs(a, current, ks);
-        if (sel res_navigate_segs.err) {
+        val err_define_key: err[TomlError] = define_key(a, current, ks, parsed);
+        if (sel err_define_key.err) {
             value_dnit(a, ?parsed);
-            ret err[TomlError].err{at(res_navigate_segs.err, key_at)};
-        }
-
-        val err_table_set: err[Error] = table_set(a, res_navigate_segs.ok, ks.segs[ks.len - 1], parsed);
-        if (sel err_table_set.err) {
-            value_dnit(a, ?parsed);
-            ret err[TomlError].err{TomlError.alloc{err_table_set.err}};
+            ret err[TomlError].err{at(err_define_key.err, key_at)};
         }
 
         skip_to_newline(src, ?i);
@@ -435,21 +458,53 @@ $if (capability.HOSTED) {
         ret 0;
     }
 
-    # the key a caller hands to the parser is never adopted, so a document that sets
-    # the same key twice releases the loser rather than keeping both
-    test toml__overwritten_key_is_released {
+    # whether document `doc` is refused with a conflict at offset `at_`
+    #[testing]
+    fun conflict_at(a: *Allocator, doc: str, at_: usize) bool {
+        val res_parse: res[Table, TomlError] = parse(a, doc);
+        if (sel res_parse.ok) {
+            var t: Table = res_parse.ok;
+            dnit(a, ?t);
+            ret false;
+        }
+        if (!sel res_parse.err.conflict) { ret false; }
+        ret res_parse.err.conflict == at_;
+    }
+
+    # TOML 1.0 defines a key or table once: each redefinition is refused at its
+    # key and releases the value it parsed, while a header may still pass through
+    # what an ended section's dotted keys made and into an array of tables
+    test toml__redefinition_is_refused {
         var c: testing.Counting;
         var a: Allocator;
         testing.counting_make(?c, ?a);
 
-        val res_parse: res[Table, TomlError] = parse(?a,
-            "dup = \"first value here\"\ndup = \"second value here\"\ndup = [1, 2, 3]\ndup = { x = \"y\" }\n");
-        if (sel res_parse.err) { ret 2; }
-        var t: Table = res_parse.ok;
-        if (table_len(?t) != 1) { ret 3; }
+        if (!conflict_at(?a, "dup = \"first value here\"\ndup = [\"a\", \"b\"]\n", 25)) { ret 1; }
+        if (!conflict_at(?a, "x = { k = \"v\", k = \"w\" }\n", 15))                     { ret 2; }
+        if (!conflict_at(?a, "[a]\n[a]\n", 5))                                          { ret 3; }
+        if (!conflict_at(?a, "a.b = \"x\"\na.b = \"y\"\n", 10))                         { ret 4; }
+        if (!conflict_at(?a, "a.b = 1\n[a]\n", 9))                                      { ret 5; }
+        if (!conflict_at(?a, "[a.b]\n[a]\nb.c = 1\n", 10))                              { ret 6; }
+        if (!conflict_at(?a, "a = { x = 1 }\n[a]\n", 15))                               { ret 7; }
+        if (!conflict_at(?a, "a = { x = 1 }\na.y = \"z\"\n", 14))                       { ret 8; }
+        if (!conflict_at(?a, "a = []\n[[a]]\n", 9))                                     { ret 9; }
+        if (!conflict_at(?a, "[[a]]\n[a]\n", 7))                                        { ret 10; }
 
+        val res_parse: res[Table, TomlError] = parse(?a, "[fruit]\napple.color = 1\n[fruit.apple.texture]\n[[f]]\n[f.p]\nx = 1\n[[f]]\n[f.p]\nx = 2\n");
+        if (sel res_parse.err) { ret 11; }
+        var t:      Table       = res_parse.ok;
+        var second: i64         = 0;
+        val opt_f:  opt[*Array] = get_array(?t, "f");
+        if (sel opt_f.some) {
+            val opt_element: opt[*Value] = array_get(opt_f.some, 1);
+            if (sel opt_element.some) {
+                val opt_x: opt[i64] = get_int(?opt_element.some.data.table, "p.x");
+                if (sel opt_x.some) { second = opt_x.some; }
+            }
+        }
         dnit(?a, ?t);
-        if (c.live != 0) { ret 4; }
+        if (second != 2) { ret 12; }
+        if (c.live != 0) { ret 13; }
         ret 0;
     }
 
@@ -797,24 +852,24 @@ $if (capability.HOSTED) {
         ret 0;
     }
 
-    # a header that names a table a dotted key created first re-positions it at
-    # the header, so a missing key is reported against the definition
-    test toml__header_restamps_dotted_table {
+    # a header that names a table a deeper header created first re-positions it
+    # at the header, so a missing key is reported against the definition
+    test toml__header_restamps_implicit_table {
         var c: testing.Counting;
         var a: Allocator;
         testing.counting_make(?c, ?a);
 
-        val res_parse: res[Table, TomlError] = parse(?a, "a.b = 1\n[a]\nc = 2\n");
+        val res_parse: res[Table, TomlError] = parse(?a, "[a.b]\nx = 1\n[a]\nc = 2\n");
         if (sel res_parse.err) { ret 2; }
         var t:         Table       = res_parse.ok;
         val opt_entry: opt[*Value] = get(?t, "a");
-        if (!sel opt_entry.some)                 { ret 3; }
-        if (!span_is(opt_entry.some.span, 8, 3)) { ret 4; }
-        if (!span_is(opt_entry.some.key, 9, 1))  { ret 5; }
+        if (!sel opt_entry.some)                  { ret 3; }
+        if (!span_is(opt_entry.some.span, 12, 3)) { ret 4; }
+        if (!span_is(opt_entry.some.key, 13, 1))  { ret 5; }
         val opt_a_b: opt[*Value] = get(?t, "a.b");
         if (!sel opt_a_b.some)                 { ret 6; }
-        if (!span_is(opt_a_b.some.key, 2, 1))  { ret 7; }
-        if (!span_is(opt_a_b.some.span, 6, 1)) { ret 8; }
+        if (!span_is(opt_a_b.some.key, 3, 1))  { ret 7; }
+        if (!span_is(opt_a_b.some.span, 0, 5)) { ret 8; }
 
         dnit(?a, ?t);
         if (c.live != 0) { ret 9; }

@@ -13,6 +13,16 @@ pub val TYPE_BOOL:    u8 = 3;
 pub val TYPE_ARRAY:   u8 = 4;
 pub val TYPE_TABLE:   u8 = 5;
 
+# what may still extend a table or array, kept by the parse (TOML 1.0 forbids
+# defining a key or table twice): a header may define an implicit table once,
+# dotted keys extend only what dotted keys made or entered, and nothing extends
+# a literal. a later section's dotted keys never reach an earlier section's: the
+# path from below its own table to them passes through a table a header defined
+pub val ORIGIN_IMPLICIT: u8 = 0; # named only as a header's inner segment, or not parsed
+pub val ORIGIN_DEFINED:  u8 = 1; # defined by a header, or appended by [[header]]
+pub val ORIGIN_DOTTED:   u8 = 2; # made or entered by dotted keys
+pub val ORIGIN_LITERAL:  u8 = 3; # written as a value: an inline table or an array
+
 # a byte range of the document handed to `parse`
 # ---
 # at:  offset of the first byte, as `TomlError` positions its failures
@@ -34,14 +44,16 @@ pub rec Span {
 # when a header appended it, else the zero span. a value not produced by
 # `parse` carries the zero span in both.
 # ---
-# tag:  type discriminator (TYPE_*)
-# span: the value's literal in the source
-# key:  the key token that maps to it
+# tag:    type discriminator (TYPE_*)
+# origin: how a parse came to hold a table or array (ORIGIN_*)
+# span:   the value's literal in the source
+# key:    the key token that maps to it
 pub rec Value {
-    tag:  u8;
-    span: Span;
-    key:  Span;
-    data: uni {
+    tag:    u8;
+    origin: u8;
+    span:   Span;
+    key:    Span;
+    data:   uni {
         string: str;
         integer: i64;
         float: f64;

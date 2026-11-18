@@ -9,7 +9,6 @@ use std.types.error.err;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.string.str_equals;
 use std.types.string.str_len;
 use toml.error.TomlError;
 use toml.lookup.table_find;
@@ -94,9 +93,8 @@ pub fun array_dnit(a: *Allocator, arr: *Array) err[Error] {
 
 # release a key-segment list: every segment string, then the segment array
 #
-# A segment is never adopted by a table - `table_set` stores its own copy - so
-# the list owns every segment it parsed and frees all of them, whether or not the
-# key they spell was already present.
+# A segment is never adopted by a table - `table_insert` stores its own copy - so
+# the list owns every segment it parsed and frees all of them.
 # ---
 # a:  allocator the segments were parsed with
 # ks: segment list to tear down; reset to empty
@@ -156,34 +154,19 @@ pub fun dnit(a: *Allocator, t: *Table) err[Error] {
     ret err_first;
 }
 
-# insert or overwrite a key-value pair in a table
+# insert a key-value pair under a key the table does not hold
 #
 # a refused acquisition leaves the table exactly as it was and the value the
 # caller's; a growth refused part way releases the buffer it acquired first.
 # ---
 # a:    allocator for growth
 # t:    target table
-# key:  key string
+# key:  key string, absent from `t`
 # val_: value to store
 # ret:  ok, or the allocator's refusal
-pub fun table_set(a: *Allocator, t: *Table, key: str, val_: Value) err[Error] {
-    # overwrite existing key: the table keeps the key copy it already owns and
-    # releases the value being displaced, so a re-set never strands the old one
-    val keys: *str   = t.keys::*str;
-    val vals: *Value = t.values::*Value;
-    var i:    usize  = 0;
-    for (i < t.len) {
-        if (str_equals(keys[i], key)) {
-            value_dnit(a, ?vals[i]);
-            vals[i] = val_;
-            ret err[Error].ok{};
-        }
-        i = i + 1;
-    }
-
+pub fun table_insert(a: *Allocator, t: *Table, key: str, val_: Value) err[Error] {
     # the table owns its keys, so it stores a copy rather than adopting the
-    # caller's string. one rule for every insert path: the caller frees what it
-    # passed, whether or not the key was already present
+    # caller's string: the caller frees what it passed
     val res_alloc_str: res[str, Error] = alloc_str(a, key, 0, str_len(key));
     if (sel res_alloc_str.err) { ret err[Error].err{res_alloc_str.err}; }
     val owned_key: str = res_alloc_str.ok;
@@ -236,30 +219,21 @@ pub fun table_set(a: *Allocator, t: *Table, key: str, val_: Value) err[Error] {
     ret err[Error].ok{};
 }
 
-# find or create a sub-table under a key
-#
-# a conflict is reported without a position; the caller that knows the key's
-# offset places it with `at`.
+# add an empty sub-table under a key the table does not hold
 # ---
-# a:   allocator for new table storage
-# t:   parent table
-# key: key for the sub-table
-# tok: the key token creating it, recorded as its span and key when it is new
-# ret: the table-typed value, or the failure
-pub fun table_ensure_subtable(a: *Allocator, t: *Table, key: str, tok: Span) res[*Value, TomlError] {
-    val existing: *Value = table_find(t, key);
-    if (existing != nil) {
-        if (existing.tag != TYPE_TABLE) {
-            ret res[*Value, TomlError].err{TomlError.conflict{0}};
-        }
-        ret res[*Value, TomlError].ok{existing};
-    }
-
+# a:      allocator for new table storage
+# t:      parent table
+# key:    key for the sub-table, absent from `t`
+# tok:    the key token creating it, recorded as its span and key
+# origin: what may still extend it (ORIGIN_*)
+# ret:    the table-typed value, or the failure
+pub fun table_add_subtable(a: *Allocator, t: *Table, key: str, tok: Span, origin: u8) res[*Value, TomlError] {
     var empty: Value = value_table(table_init());
-    empty.span = tok;
-    empty.key  = tok;
-    val err_table_set: err[Error] = table_set(a, t, key, empty);
-    if (sel err_table_set.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_table_set.err}}; }
+    empty.origin = origin;
+    empty.span   = tok;
+    empty.key    = tok;
+    val err_table_insert: err[Error] = table_insert(a, t, key, empty);
+    if (sel err_table_insert.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_table_insert.err}}; }
     ret res[*Value, TomlError].ok{table_find(t, key)};
 }
 

@@ -4,7 +4,7 @@
 # all memory is owned by the provided allocator (typically an arena).
 #
 # a parse reports a TomlError: syntax, an integer that does not fit, nesting
-# past the bound and a key that collides with a value of another shape are
+# past the bound and a key or table defined twice are
 # distinct, each positioned at the byte offset in the document, and a refused
 # allocation is the allocator's own error. a parse that fails part way
 # releases everything it acquired before reporting.
