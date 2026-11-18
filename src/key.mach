@@ -33,10 +33,13 @@ use toml.value.span_from;
 # i:   cursor position
 # ret: the key string, or the failure
 fun parse_key_segment(a: *Allocator, src: str, i: *usize) res[str, TomlError] {
-    if (src[@i] == '"') {
+    # a quoted key is a single-line string, never a multi-line one
+    val q: u8 = src[@i];
+    if ((q == '"' || q == '\'') && src[@i + 1] == q && src[@i + 2] == q) { ret text_fail(TomlError.syntax{@i}); }
+    if (q == '"') {
         ret parse_basic_string(a, src, i);
     }
-    if (src[@i] == '\'') {
+    if (q == '\'') {
         ret parse_literal_string(a, src, i);
     }
 

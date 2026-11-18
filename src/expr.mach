@@ -155,10 +155,15 @@ fun parse_array_value(a: *Allocator, src: str, i: *usize, depth: usize) res[Valu
             ret value_fail(TomlError.alloc{err_array_push.err});
         }
 
+        # elements are separated by commas
         skip_ws_comments_newlines(src, i);
         if (src[@i] == ',') {
             @i = @i + 1;
             cnt;
+        }
+        if (src[@i] != ']') {
+            array_dnit(a, ?arr);
+            ret value_fail(TomlError.syntax{@i});
         }
     }
 

@@ -94,7 +94,8 @@ fun decode_escape(src: str, si: *usize, buf: *u8, di: usize) usize {
             k    = k + 1;
         }
 
-        if (code >= 0xD800 && code <= 0xDFFF) { ret 0; }
+        # a unicode scalar value: no surrogate, nothing past U+10FFFF
+        if (code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) { ret 0; }
 
         @si = @si + ndig + 1;
         ret encode_utf8(buf, di, code);
@@ -171,6 +172,30 @@ fun encode_utf8(buf: *u8, di: usize, code: u32) usize {
     ret 4;
 }
 
+# whether a byte is a control character a string may not hold unescaped:
+# every one but tab, and in a multi-line string line feed and carriage return
+fun is_raw_control(b: u8, multi_line: bool) bool {
+    if (b == '\t')                              { ret false; }
+    if (multi_line && (b == '\n' || b == '\r')) { ret false; }
+    ret b < 0x20 || b == 0x7F;
+}
+
+# whether the backslash before src[at] ends its line: only whitespace follows
+# it up to a newline
+fun is_line_ending(src: str, at: usize) bool {
+    var k: usize = at;
+    for (src[k] == ' ' || src[k] == '\t') { k = k + 1; }
+    ret src[k] == '\n' || (src[k] == '\r' && src[k + 1] == '\n');
+}
+
+# how many quotes of the run at a multi-line string's closing delimiter belong
+# to the body: up to two before the last three
+fun body_quotes(src: str, at: usize, q: u8) usize {
+    var n: usize = 0;
+    for (n < 2 && src[at + 3 + n] == q) { n = n + 1; }
+    ret n;
+}
+
 # parse a double-quoted string with escape processing
 # expects the cursor on the opening '"'.
 # ---
@@ -192,8 +217,8 @@ pub fun parse_basic_string(a: *Allocator, src: str, i: *usize) res[str, TomlErro
     var out_len: usize = 0;
     for {
         val b: u8 = src[@i];
-        if (b == 0 || b == '\n') { ret text_fail(TomlError.syntax{@i}); }
-        if (b == '"')            { brk; }
+        if (is_raw_control(b, false)) { ret text_fail(TomlError.syntax{@i}); }
+        if (b == '"')                 { brk; }
         if (b == '\\') {
             @i = @i + 1;
             if (src[@i] == 0)           { ret text_fail(TomlError.syntax{@i}); }
@@ -252,12 +277,17 @@ fun parse_ml_basic_string(a: *Allocator, src: str, i: *usize) res[str, TomlError
 
     # pass 1: compute output length
     for {
-        if (src[@i] == 0)                                               { ret text_fail(TomlError.syntax{@i}); }
-        if (src[@i] == '"' && src[@i + 1] == '"' && src[@i + 2] == '"') { brk; }
+        if (is_raw_control(src[@i], true)) { ret text_fail(TomlError.syntax{@i}); }
+        if (src[@i] == '"' && src[@i + 1] == '"' && src[@i + 2] == '"') {
+            val extra: usize = body_quotes(src, @i, '"');
+            out_len = out_len + extra;
+            @i      = @i + extra;
+            brk;
+        }
         if (src[@i] == '\\') {
             @i = @i + 1;
-            # line-ending backslash: skip trailing whitespace
-            if (is_ws_or_newline(src[@i])) {
+            # line-ending backslash: skip the whitespace and newlines after it
+            if (is_line_ending(src, @i)) {
                 for (is_ws_or_newline(src[@i])) { @i = @i + 1; }
                 cnt;
             }
@@ -277,10 +307,10 @@ fun parse_ml_basic_string(a: *Allocator, src: str, i: *usize) res[str, TomlError
     var si: usize = start;
     var di: usize = 0;
     for {
-        if (src[si] == '"' && src[si + 1] == '"' && src[si + 2] == '"') { brk; }
+        if (si == @i) { brk; }
         if (src[si] == '\\') {
             si = si + 1;
-            if (is_ws_or_newline(src[si])) {
+            if (is_line_ending(src, si)) {
                 for (is_ws_or_newline(src[si])) { si = si + 1; }
                 cnt;
             }
@@ -319,7 +349,7 @@ pub fun parse_literal_string(a: *Allocator, src: str, i: *usize) res[str, TomlEr
     }
 
     val start: usize = @i;
-    for (src[@i] != 0 && src[@i] != '\'' && src[@i] != '\n') {
+    for (src[@i] != '\'' && !is_raw_control(src[@i], false)) {
         @i = @i + 1;
     }
     if (src[@i] != '\'') { ret text_fail(TomlError.syntax{@i}); }
@@ -344,8 +374,11 @@ fun parse_ml_literal_string(a: *Allocator, src: str, i: *usize) res[str, TomlErr
 
     val start: usize = @i;
     for {
-        if (src[@i] == 0)                                                  { ret text_fail(TomlError.syntax{@i}); }
-        if (src[@i] == '\'' && src[@i + 1] == '\'' && src[@i + 2] == '\'') { brk; }
+        if (is_raw_control(src[@i], true)) { ret text_fail(TomlError.syntax{@i}); }
+        if (src[@i] == '\'' && src[@i + 1] == '\'' && src[@i + 2] == '\'') {
+            @i = @i + body_quotes(src, @i, '\'');
+            brk;
+        }
         @i = @i + 1;
     }
 

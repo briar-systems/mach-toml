@@ -1,6 +1,8 @@
 # byte classes, and skipping whitespace, newlines and comments
 
 use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
 use std.types.size.usize;
 use std.types.string.str;
 
@@ -50,11 +52,25 @@ pub fun skip_ws_comments_newlines(src: str, i: *usize) {
     }
 }
 
-pub fun skip_to_newline(src: str, i: *usize) {
+# skip the rest of a line after a value or header: whitespace, a comment, then
+# the newline
+# ---
+# src: source text
+# i:   cursor position, left past the newline
+# ret: whether the line ended there, at a newline or the end of the text
+pub fun skip_to_newline(src: str, i: *usize) bool {
     skip_ws(src, i);
     skip_comment(src, i);
-    if (src[@i] == '\r') { @i = @i + 1; }
-    if (src[@i] == '\n') { @i = @i + 1; }
+    if (src[@i] == 0) { ret true; }
+    if (src[@i] == '\n') {
+        @i = @i + 1;
+        ret true;
+    }
+    if (src[@i] == '\r' && src[@i + 1] == '\n') {
+        @i = @i + 2;
+        ret true;
+    }
+    ret false;
 }
 
 # return the numeric value of a hex character, or -1
