@@ -9,6 +9,7 @@ use std.types.string.str;
 use toml.error.TomlError;
 use toml.lookup.table_find;
 use toml.scan.is_bare_key_char;
+use toml.scan.skip_ws;
 use toml.string.alloc_str;
 use toml.string.parse_basic_string;
 use toml.string.parse_literal_string;
@@ -62,7 +63,7 @@ fun parse_key_segment(a: *Allocator, src: str, i: *usize) res[str, TomlError] {
 # ---
 # a:   allocator
 # src: source text
-# i:   cursor position
+# i:   cursor position, left past the key and the whitespace after it
 # ks:  the segment list to fill, empty on entry
 # ret: ok, or the failure
 pub fun parse_key_path(a: *Allocator, src: str, i: *usize, ks: *KeySegs) err[TomlError] {
@@ -76,8 +77,12 @@ pub fun parse_key_path(a: *Allocator, src: str, i: *usize, ks: *KeySegs) err[Tom
         ret err[TomlError].err{TomlError.alloc{err_keysegs_push.err}};
     }
 
-    for (src[@i] == '.') {
+    # whitespace around a dot is ignored (TOML 1.0, "Keys")
+    for {
+        skip_ws(src, i);
+        if (src[@i] != '.') { brk; }
         @i = @i + 1;
+        skip_ws(src, i);
         val seg_at:  usize               = @i;
         val res_seg: res[str, TomlError] = parse_key_segment(a, src, i);
         if (sel res_seg.err) { ret err[TomlError].err{res_seg.err}; }

@@ -3,15 +3,13 @@
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
+use toml.error.TomlError;
 
 fun is_ws(b: u8) bool {
     ret b == ' ' || b == '\t';
-}
-
-pub fun is_ws_or_newline(b: u8) bool {
-    ret b == ' ' || b == '\t' || b == '\n' || b == '\r';
 }
 
 pub fun is_bare_key_char(b: u8) bool {
@@ -27,15 +25,35 @@ pub fun skip_ws(src: str, i: *usize) {
     }
 }
 
-fun skip_ws_and_newlines(src: str, i: *usize) {
-    for (is_ws_or_newline(src[@i])) {
-        @i = @i + 1;
+# skip whitespace and newlines, a newline being LF or CRLF; a lone CR is
+# neither (TOML 1.0, "Spec")
+pub fun skip_ws_and_newlines(src: str, i: *usize) {
+    for {
+        if (is_ws(src[@i]) || src[@i] == '\n') {
+            @i = @i + 1;
+            cnt;
+        }
+        if (src[@i] == '\r' && src[@i + 1] == '\n') {
+            @i = @i + 2;
+            cnt;
+        }
+        brk;
     }
 }
 
+# whether a byte may sit in a comment: tab, and everything from space up but
+# DEL (TOML 1.0, "Comment")
+fun is_comment_byte(b: u8) bool {
+    ret b == '\t' || (b >= 0x20 && b != 0x7F);
+}
+
+# skip a comment, leaving the cursor on the first byte that may not sit in one:
+# the newline or end of text that ends it, or a control character that its
+# line's reader refuses where it stands
 fun skip_comment(src: str, i: *usize) {
     if (src[@i] == '#') {
-        for (src[@i] != 0 && src[@i] != '\n') {
+        @i = @i + 1;
+        for (is_comment_byte(src[@i])) {
             @i = @i + 1;
         }
     }
@@ -71,6 +89,53 @@ pub fun skip_to_newline(src: str, i: *usize) bool {
         ret true;
     }
     ret false;
+}
+
+# where the text at src ends, at its NUL or at byte n, whichever comes first,
+# refused at the first byte that breaks UTF-8 (TOML 1.0, "Spec")
+#
+# a lead byte admits continuation bytes in the ranges of Unicode's table 3-7, so
+# an overlong form, a surrogate or a code point past U+10FFFF is refused at the
+# first byte that rules it out, and a sequence cut short at the byte it lacks
+# ---
+# src: the text
+# n:   how many bytes it may hold at most
+# ret: the offset of the end, or the syntax failure
+pub fun text_end(src: *u8, n: usize) res[usize, TomlError] {
+    var i: usize = 0;
+    for (i < n && src[i] != 0) {
+        val b: u8 = src[i];
+        if (b < 0x80) {
+            i = i + 1;
+            cnt;
+        }
+        var more: usize = 2;
+        var lo:   u8    = 0x80;
+        var hi:   u8    = 0xBF;
+        if (b >= 0xC2 && b <= 0xDF) { more = 1; }
+        or (b == 0xE0)              { lo = 0xA0; }
+        or (b == 0xED)              { hi = 0x9F; }
+        or (b >= 0xE1 && b <= 0xEF) {}
+        or (b == 0xF0) {
+            more = 3;
+            lo   = 0x90;
+        }
+        or (b >= 0xF1 && b <= 0xF3) { more = 3; }
+        or (b == 0xF4) {
+            more = 3;
+            hi   = 0x8F;
+        }
+        or { ret res[usize, TomlError].err{TomlError.syntax{i}}; }
+        i = i + 1;
+        for (more > 0) {
+            if (i >= n || src[i] < lo || src[i] > hi) { ret res[usize, TomlError].err{TomlError.syntax{i}}; }
+            lo   = 0x80;
+            hi   = 0xBF;
+            more = more - 1;
+            i    = i + 1;
+        }
+    }
+    ret res[usize, TomlError].ok{i};
 }
 
 # return the numeric value of a hex character, or -1

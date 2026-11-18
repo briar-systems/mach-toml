@@ -1,6 +1,11 @@
 # numeric literals: decimal, float, hex, octal and binary integers
 
+use std.math.ieee;
 use std.memory;
+use std.text.parse.F64ParseWork;
+use std.text.parse.ParseError;
+use std.text.parse.Radix;
+use std.text.parse.parse_float;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -95,7 +100,6 @@ pub fun parse_number(src: str, i: *usize) res[Value, TomlError] {
     var x:        u64   = 0;
     var digits:   usize = 0;
     var past_u64: bool  = false;
-    var whole:    f64   = 0.0;
     for {
         val b: u8 = src[@i];
         if (b == '_') {
@@ -107,7 +111,6 @@ pub fun parse_number(src: str, i: *usize) res[Value, TomlError] {
         digits = digits + 1;
         # a float's integer part may pass u64, an integer's never can
         val digit: u64 = (b - '0')::u64;
-        whole = whole * 10.0 + digit::f64;
         if (x > 18446744073709551615 / 10 || digit > 18446744073709551615 - x * 10) { past_u64 = true; }
         or                                                                          { x = x * 10 + digit; }
         @i = @i + 1;
@@ -116,131 +119,60 @@ pub fun parse_number(src: str, i: *usize) res[Value, TomlError] {
     if (digits == 0)                        { ret value_fail(TomlError.syntax{@i}); }
     if (digits > 1 && src[first_at] == '0') { ret value_fail(TomlError.syntax{first_at}); }
 
-    if (!past_u64) { whole = x::f64; }
-
-    # fractional part
+    var is_float: bool = false;
     if (src[@i] == '.' && is_digit(src[@i + 1])) {
-        ret parse_float_frac(src, i, whole, sign);
+        @i = @i + 1;
+        if (!scan_digits(src, i)) { ret value_fail(TomlError.syntax{@i}); }
+        is_float = true;
     }
-
-    # exponent without fraction
     if (src[@i] == 'e' || src[@i] == 'E') {
-        ret parse_float_exp(src, i, whole * sign::f64);
+        @i = @i + 1;
+        if (src[@i] == '+' || src[@i] == '-') { @i = @i + 1; }
+        if (!is_digit(src[@i]))               { ret value_fail(TomlError.syntax{@i}); }
+        if (!scan_digits(src, i))             { ret value_fail(TomlError.syntax{@i}); }
+        is_float = true;
     }
+    if (is_float) { ret decimal_float(src, at_, @i); }
 
     if (past_u64) { ret value_fail(TomlError.overflow{at_}); }
     ret signed_int(x, sign, at_);
 }
 
-# parse the fractional part of a float after the '.'
+# scan a run of digits with each underscore between two of them, the cursor on
+# its first digit
 # ---
-# src:      source text
-# i:        cursor position (on the '.')
-# int_part: integer digits already parsed
-# sign:     1 or -1
-# ret:      parsed float Value, or the failure
-fun parse_float_frac(src: str, i: *usize, int_part: f64, sign: i64) res[Value, TomlError] {
-    @i = @i + 1;
-    var frac:    f64 = 0.0;
-    var divisor: f64 = 1.0;
-
+# src: source text
+# i:   cursor position, left past the run, or on an underscore no digit follows
+# ret: whether every underscore sat between digits
+fun scan_digits(src: str, i: *usize) bool {
     for {
         val b: u8 = src[@i];
         if (b == '_') {
-            if (!is_digit(src[@i + 1])) { ret value_fail(TomlError.syntax{@i}); }
+            if (!is_digit(src[@i + 1])) { ret false; }
             @i = @i + 1;
             cnt;
         }
-        if (b < '0' || b > '9') { brk; }
-        frac    = frac * 10.0 + (b - '0')::u64::f64;
-        divisor = divisor * 10.0;
-        @i      = @i + 1;
+        if (!is_digit(b)) { ret true; }
+        @i = @i + 1;
     }
-
-    var result: f64 = (int_part + frac / divisor) * sign::f64;
-
-    if (src[@i] == 'e' || src[@i] == 'E') {
-        ret parse_float_exp(src, i, result);
-    }
-
-    ret value_ok(value_float(result));
 }
 
-# parse the exponent part of a float after 'e'/'E'
+# the float a decimal literal TOML's grammar has accepted denotes, correctly
+# rounded to binary64 by the standard library's one decimal conversion
 # ---
-# src:      source text
-# i:        cursor position (on the 'e' or 'E')
-# mantissa: value accumulated so far
-# ret:      parsed float Value, or the failure
-fun parse_float_exp(src: str, i: *usize, mantissa: f64) res[Value, TomlError] {
-    @i = @i + 1;
-    var exp_sign: i64 = 1;
-    if (src[@i] == '+') { @i = @i + 1; }
-    or (src[@i] == '-') {
-        exp_sign = -1;
-        @i       = @i + 1;
+# src:  source text
+# from: where the literal starts, at its sign if it has one
+# to:   one past its last byte
+# ret:  the float Value, or the failure
+fun decimal_float(src: str, from: usize, to: usize) res[Value, TomlError] {
+    var work:            F64ParseWork;
+    val res_parse_float: res[u128, ParseError] = parse_float(ieee.F64, Radix.decimal{}, (src::usize + from)::str, to - from, true, (?work)::*u32);
+    if (sel res_parse_float.err) {
+        val e: ParseError = res_parse_float.err;
+        if (sel e.syntax) { ret value_fail(TomlError.syntax{from + e.syntax}); }
+        ret value_fail(TomlError.syntax{from});
     }
-
-    var exp: i64  = 0;
-    var any: bool = false;
-    for {
-        val b: u8 = src[@i];
-        if (b == '_') {
-            if (!any || !is_digit(src[@i + 1])) { ret value_fail(TomlError.syntax{@i}); }
-            @i = @i + 1;
-            cnt;
-        }
-        if (b < '0' || b > '9') { brk; }
-        any = true;
-        exp = exp * 10 + (b - '0')::u64::i64;
-        @i  = @i + 1;
-    }
-    if (!any) { ret value_fail(TomlError.syntax{@i}); }
-
-    var result: f64 = mantissa;
-    result = apply_pow10(result, exp, exp_sign);
-
-    ret value_ok(value_float(result));
-}
-
-# multiply or divide value by 10^exp using a lookup table
-fun apply_pow10(value: f64, exp: i64, exp_sign: i64) f64 {
-    var pow10: [20]f64;
-    pow10[0]  = 1.0;
-    pow10[1]  = 10.0;
-    pow10[2]  = 100.0;
-    pow10[3]  = 1000.0;
-    pow10[4]  = 10000.0;
-    pow10[5]  = 100000.0;
-    pow10[6]  = 1000000.0;
-    pow10[7]  = 10000000.0;
-    pow10[8]  = 100000000.0;
-    pow10[9]  = 1000000000.0;
-    pow10[10] = 10000000000.0;
-    pow10[11] = 100000000000.0;
-    pow10[12] = 1000000000000.0;
-    pow10[13] = 10000000000000.0;
-    pow10[14] = 100000000000000.0;
-    pow10[15] = 1000000000000000.0;
-    pow10[16] = 10000000000000000.0;
-    pow10[17] = 100000000000000000.0;
-    pow10[18] = 1000000000000000000.0;
-    pow10[19] = 10000000000000000000.0;
-
-    var result:    f64 = value;
-    var remaining: i64 = exp;
-    for (remaining > 0) {
-        var chunk: i64 = remaining;
-        if (chunk > 19) { chunk = 19; }
-        if (exp_sign > 0) {
-            result = result * pow10[chunk::usize];
-        }
-        or {
-            result = result / pow10[chunk::usize];
-        }
-        remaining = remaining - chunk;
-    }
-    ret result;
+    ret value_ok(value_float(res_parse_float.ok::u64:~f64));
 }
 
 # parse hexadecimal digits into an integer value

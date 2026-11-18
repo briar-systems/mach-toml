@@ -19,6 +19,7 @@ use toml.lookup.table_find;
 use toml.scan.skip_to_newline;
 use toml.scan.skip_ws;
 use toml.scan.skip_ws_comments_newlines;
+use toml.scan.text_end;
 use toml.tree.KeySegs;
 use toml.tree.array_dnit;
 use toml.tree.array_push;
@@ -189,24 +190,16 @@ fun navigate_for_array_table(a: *Allocator, root: *Table, ks: *KeySegs) res[*Val
 #
 # supports TOML 1.0: basic and literal strings (single and multi-line),
 # integers (decimal, hex, octal, binary), floats, booleans, arrays,
-# tables, inline tables, array of tables, and dotted keys.
+# tables, inline tables, array of tables, and dotted keys. the text must be
+# UTF-8, and is refused at the first byte that is not.
 # ---
 # a:   allocator for all internal allocations
 # src: null-terminated TOML source string
 # ret: the root table, or the failure; a failed parse strands nothing
 pub fun parse(a: *Allocator, src: str) res[Table, TomlError] {
-    # the two owned values the walk builds are held HERE, so every failure inside
-    # it releases them on the way out. the walk itself only reports the failure -
-    # it never has to unwind, and a new error return cannot forget to (#3001)
-    var root:           Table          = table_init();
-    var ks:             KeySegs        = keysegs_init();
-    val err_parse_walk: err[TomlError] = parse_walk(a, src, ?root, ?ks);
-    keysegs_dnit(a, ?ks);
-    if (sel err_parse_walk.err) {
-        dnit(a, ?root);
-        ret res[Table, TomlError].err{err_parse_walk.err};
-    }
-    ret res[Table, TomlError].ok{root};
+    val res_text_end: res[usize, TomlError] = text_end(src, 0xffffffffffffffff::usize);
+    if (sel res_text_end.err) { ret res[Table, TomlError].err{res_text_end.err}; }
+    ret parse_text(a, src);
 }
 
 # parse a TOML document held as `n` bytes that need not end in a NUL
@@ -219,20 +212,34 @@ pub fun parse(a: *Allocator, src: str) res[Table, TomlError] {
 # n:   how many
 # ret: the root table, or the failure; a failed parse strands nothing
 pub fun parse_bytes(a: *Allocator, src: *u8, n: usize) res[Table, TomlError] {
-    var i: usize = 0;
-    for (i < n) {
-        if (src[i] == 0) { ret res[Table, TomlError].err{TomlError.nul{i}}; }
-        i = i + 1;
-    }
+    val res_text_end: res[usize, TomlError] = text_end(src, n);
+    if (sel res_text_end.err)           { ret res[Table, TomlError].err{res_text_end.err}; }
+    if (res_text_end.ok != n)           { ret res[Table, TomlError].err{TomlError.nul{res_text_end.ok}}; }
     if (n == 0xffffffffffffffff::usize) { ret res[Table, TomlError].err{TomlError.alloc{Error.overflow{}}}; }
     val res_allocate: res[*u8, Error] = allocate[u8](a, n + 1);
     if (sel res_allocate.err) { ret res[Table, TomlError].err{TomlError.alloc{res_allocate.err}}; }
     val text: *u8 = res_allocate.ok;
     memory.raw_copy(text::ptr, src::ptr, n);
     text[n] = 0;
-    val res_parsed: res[Table, TomlError] = parse(a, text::str);
+    val res_parsed: res[Table, TomlError] = parse_text(a, text::str);
     deallocate[u8](a, text, n + 1);
     ret res_parsed;
+}
+
+# parse text already checked to be UTF-8 up to its NUL
+fun parse_text(a: *Allocator, src: str) res[Table, TomlError] {
+    # the two owned values the walk builds are held HERE, so every failure inside
+    # it releases them on the way out. the walk itself only reports the failure -
+    # it never has to unwind, and a new error return cannot forget to (#3001)
+    var root:           Table          = table_init();
+    var ks:             KeySegs        = keysegs_init();
+    val err_parse_walk: err[TomlError] = parse_walk(a, src, ?root, ?ks);
+    keysegs_dnit(a, ?ks);
+    if (sel err_parse_walk.err) {
+        dnit(a, ?root);
+        ret res[Table, TomlError].err{err_parse_walk.err};
+    }
+    ret res[Table, TomlError].ok{root};
 }
 
 # the document walk: table headers, arrays of tables, and key/value lines
@@ -413,7 +420,7 @@ $if (capability.HOSTED) {
     test toml__integer_bases_and_special_floats {
         var a: Allocator;
         page.make(?a);
-        val res_parse: res[Table, TomlError] = parse(?a, "h = 0xDEAD_beef\no = 0o7_55\nb = 0b1_101\nd = -1_000\np = +17\ni = inf\nn = -inf\nq = nan\nm = -nan\nmax = 9223372036854775807\nmin = -9223372036854775808\nhmax = 0x7FFF_FFFF_FFFF_FFFF\nbig = 100000000000000000000.0\n");
+        val res_parse: res[Table, TomlError] = parse(?a, "h = 0xDEAD_beef\no = 0o7_55\nb = 0b1_101\nd = -1_000\np = +17\ni = inf\nn = -inf\nq = nan\nm = -nan\nmax = 9223372036854775807\nmin = -9223372036854775808\nhmax = 0x7FFF_FFFF_FFFF_FFFF\nbig = 100000000000000000000.0\nfmax = 1.7976931348623157e308\nup = 1.00000000000000011102230246251565404236316680908203126\nsub = 2.4703282292062328e-324\n");
         if (sel res_parse.err) { ret 1; }
         var t: Table = res_parse.ok;
         fin { dnit(?a, ?t); }
@@ -431,6 +438,9 @@ $if (capability.HOSTED) {
         if (!int_at(?t, "min", 0x8000000000000000u64:~i64)) { ret 18; }
         if (!int_at(?t, "hmax", 9223372036854775807))       { ret 19; }
         if (!float_bits_at(?t, "big", 0x4415AF1D78B58C40))  { ret 35; }
+        if (!float_bits_at(?t, "fmax", 0x7FEFFFFFFFFFFFFF)) { ret 37; }
+        if (!float_bits_at(?t, "up", 0x3FF0000000000001))   { ret 38; }
+        if (!float_bits_at(?t, "sub", 0x0000000000000001))  { ret 39; }
 
         if (!overflow_at(?a, "x = 0x1_0000_0000_0000_0000\n", 4))         { ret 11; }
         if (!overflow_at(?a, "x = 0o2_000_000_000_000_000_000_000\n", 4)) { ret 12; }
@@ -464,14 +474,15 @@ $if (capability.HOSTED) {
     # \u and \U escapes encode to one, two, three and four utf-8 bytes, and a bad
     # hex digit, a surrogate or a code past U+10FFFF is refused at the escape
     # letter; a multi-line basic string drops its first newline and a line-ending
-    # backslash with the whitespace after it, a multi-line literal string drops
-    # its first newline and keeps a backslash as text, and either keeps up to two
+    # backslash with the whitespace and newlines after it, stopping at a lone CR,
+    # which is text and not a newline; a multi-line literal string drops its
+    # first newline and keeps a backslash as text, and either keeps up to two
     # quotes before its closing three. a backslash with text after it on its
     # line, a raw control character and a multi-line quoted key are refused
     test toml__string_escapes_and_multi_line_bodies {
         var a: Allocator;
         page.make(?a);
-        val res_parse: res[Table, TomlError] = parse(?a, "u = \"\\u0041\\u00e9\\u20AC\\U0001F600\"\nb = \"\"\"\nab \\  \n    cd\"\"\"\nl = '''\r\na\\b\n'''\nq = \"\"\"a\"\"\"\"\"\nr = '''a''''\n");
+        val res_parse: res[Table, TomlError] = parse(?a, "u = \"\\u0041\\u00e9\\u20AC\\U0001F600\"\nb = \"\"\"\nab \\  \n    cd\"\"\"\nl = '''\r\na\\b\n'''\nq = \"\"\"a\"\"\"\"\"\nr = '''a''''\nc = \"\"\"a\\\n\r b\"\"\"\n");
         if (sel res_parse.err) { ret 1; }
         var t: Table = res_parse.ok;
         fin { dnit(?a, ?t); }
@@ -491,6 +502,9 @@ $if (capability.HOSTED) {
         val opt_r: opt[str] = get_str(?t, "r");
         if (!sel opt_r.some)               { ret 12; }
         if (!str_equals(opt_r.some, "a'")) { ret 13; }
+        val opt_c: opt[str] = get_str(?t, "c");
+        if (!sel opt_c.some)                  { ret 22; }
+        if (!str_equals(opt_c.some, "a\r b")) { ret 23; }
 
         if (!syntax_at(?a, "s = \"\\u12x4\"\n", 6))          { ret 8; }
         if (!syntax_at(?a, "s = \"\\uD800\"\n", 6))          { ret 9; }
@@ -612,7 +626,8 @@ $if (capability.HOSTED) {
 
     # TOML 1.0 defines a key or table once: each redefinition is refused at its
     # key and releases the value it parsed, while a header may still pass through
-    # what an ended section's dotted keys made and into an array of tables
+    # what an ended section's dotted keys made and into an array of tables.
+    # whitespace around the dots of a key does not make it another key
     test toml__redefinition_is_refused {
         var c: testing.Counting;
         var a: Allocator;
@@ -629,6 +644,12 @@ $if (capability.HOSTED) {
         if (!conflict_at(?a, "a = []\n[[a]]\n", 9))                                     { ret 9; }
         if (!conflict_at(?a, "[[a]]\n[a]\n", 7))                                        { ret 10; }
         if (!conflict_at(?a, "a = { x = 1 }\n[a.b]\n", 15))                             { ret 11; }
+
+        # whitespace around a dot is ignored, so a spaced key names the same key
+        if (!conflict_at(?a, "a.b = 1\na . b = 2\n", 8))           { ret 15; }
+        if (!conflict_at(?a, "[a.b]\n[ a\t. b ]\n", 8))            { ret 16; }
+        if (!conflict_at(?a, "[[ a . b ]]\n[a.b]\n", 13))          { ret 17; }
+        if (!conflict_at(?a, "x = { a . b = 1, a. b = 2 }\n", 17)) { ret 18; }
 
         val res_parse: res[Table, TomlError] = parse(?a, "[fruit]\napple.color = 1\n[fruit.apple.texture]\n[[f]]\n[f.p]\nx = 1\n[[f]]\n[f.p]\nx = 2\n");
         if (sel res_parse.err) { ret 12; }
@@ -801,6 +822,20 @@ $if (capability.HOSTED) {
         if (!syntax_at(?a, "a = 1\rb = 2\n", 5)) { ret 16; }
         if (!syntax_at(?a, "[a] b = 1\n", 4))    { ret 17; }
         if (!syntax_at(?a, "x = [1 2, 3]\n", 7)) { ret 18; }
+
+        # the text is UTF-8, refused at the first byte that breaks it: a bad
+        # lead, an overlong form, a sequence cut short; a comment holds no
+        # control character but tab
+        if (!syntax_at(?a, "x = 1 # \xFF\n", 8))         { ret 19; }
+        if (!syntax_at(?a, "s = \"\xE0\x80\xAF\"\n", 6)) { ret 20; }
+        if (!syntax_at(?a, "x = 1 # \xE2\x82", 10))      { ret 21; }
+        if (!syntax_at(?a, "x = 1 # a\x07b\n", 9))       { ret 22; }
+        if (!syntax_at(?a, "# a\rx = 1\n", 3))           { ret 23; }
+        if (!syntax_at(?a, "# a\x7F\n", 3))              { ret 24; }
+        val res_fine: res[Table, TomlError] = parse(?a, "# caf\xC3\xA9\t\xF0\x9F\x98\x80\r\nx = 1\n");
+        if (sel res_fine.err) { ret 25; }
+        var fine: Table = res_fine.ok;
+        dnit(?a, ?fine);
 
         if (c.live != 0) { ret 14; }
         ret 0;

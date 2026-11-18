@@ -13,7 +13,7 @@ use std.types.size.usize;
 use std.types.string.str;
 use toml.error.TomlError;
 use toml.scan.hex_digit;
-use toml.scan.is_ws_or_newline;
+use toml.scan.skip_ws_and_newlines;
 
 # allocate a copy of a substring
 # ---
@@ -288,7 +288,7 @@ fun parse_ml_basic_string(a: *Allocator, src: str, i: *usize) res[str, TomlError
             @i = @i + 1;
             # line-ending backslash: skip the whitespace and newlines after it
             if (is_line_ending(src, @i)) {
-                for (is_ws_or_newline(src[@i])) { @i = @i + 1; }
+                skip_ws_and_newlines(src, i);
                 cnt;
             }
             if (escape_is_nul(src, @i)) { ret text_fail(TomlError.nul{@i - 1}); }
@@ -311,7 +311,7 @@ fun parse_ml_basic_string(a: *Allocator, src: str, i: *usize) res[str, TomlError
         if (src[si] == '\\') {
             si = si + 1;
             if (is_line_ending(src, si)) {
-                for (is_ws_or_newline(src[si])) { si = si + 1; }
+                skip_ws_and_newlines(src, ?si);
                 cnt;
             }
             val esc_at:  usize = si;
