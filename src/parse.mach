@@ -46,6 +46,10 @@ use toml.value.value_table;
 $if (capability.HOSTED) {
     use std.allocator.page;
     use std.allocator.testing;
+    use std.chrono.date.Date;
+    use std.chrono.date.Datetime;
+    use std.chrono.date.LocalDatetime;
+    use std.chrono.date.TimeOfDay;
     use std.types.bool.bool;
     use std.types.bool.false;
     use std.types.bool.true;
@@ -60,6 +64,10 @@ $if (capability.HOSTED) {
     use toml.lookup.get_array;
     use toml.lookup.get_float;
     use toml.lookup.get_int;
+    use toml.lookup.get_local_date;
+    use toml.lookup.get_local_datetime;
+    use toml.lookup.get_local_time;
+    use toml.lookup.get_offset_datetime;
     use toml.lookup.get_str;
     use toml.lookup.get_table;
     use toml.lookup.table_key;
@@ -67,6 +75,7 @@ $if (capability.HOSTED) {
     use toml.lookup.table_value;
     use toml.value.Span;
     use toml.value.TYPE_INTEGER;
+    use toml.value.TYPE_LOCAL_DATETIME;
     use toml.value.TYPE_STRING;
 }
 
@@ -468,6 +477,85 @@ $if (capability.HOSTED) {
         if (!syntax_at(?a, "x = 01.5\n", 4))   { ret 32; }
         if (!syntax_at(?a, "x = 1.5_\n", 7))   { ret 33; }
         if (!syntax_at(?a, "x = 1e_5\n", 6))   { ret 34; }
+        ret 0;
+    }
+
+    # the specification's examples of each of the four kinds (TOML 1.0, "Offset
+    # Date-Time" to "Local Time") read as the standard library's types, in a
+    # table, an array and an inline table, and a date that a comment follows
+    test toml__dates_and_times {
+        var a: Allocator;
+        page.make(?a);
+        val res_parse: res[Table, TomlError] = parse(?a, "odt1 = 1979-05-27T07:32:00Z\nodt2 = 1979-05-27T00:32:00-07:00\nodt3 = 1979-05-27T00:32:00.999999-07:00\nodt4 = 1979-05-27 07:32:00Z\nldt1 = 1979-05-27T07:32:00\nldt2 = 1979-05-27T00:32:00.999999\nld1 = 1979-05-27 # a date\nlt1 = 07:32:00\nlt2 = 00:32:00.999999\nmixed = [1979-05-27, 07:32:00, 1979-05-27 07:32:00]\nin = { at = 2016-12-31T23:59:60Z }\n");
+        if (sel res_parse.err) { ret 1; }
+        var t: Table = res_parse.ok;
+        fin { dnit(?a, ?t); }
+
+        val opt_odt1: opt[Datetime] = get_offset_datetime(?t, "odt1");
+        if (sel opt_odt1.none) { ret 2; }
+        val odt1: Datetime = opt_odt1.some;
+        if (odt1.year != 1979 || odt1.month != 5 || odt1.day != 27 || odt1.hour != 7 || odt1.minute != 32 || odt1.second != 0 || odt1.offset != 0) { ret 2; }
+        val opt_odt3: opt[Datetime] = get_offset_datetime(?t, "odt3");
+        if (sel opt_odt3.none)                                                    { ret 3; }
+        if (opt_odt3.some.nsec != 999999000 || opt_odt3.some.offset != 0 - 25200) { ret 3; }
+        val opt_odt4: opt[Datetime] = get_offset_datetime(?t, "odt4");
+        if (sel opt_odt4.none)       { ret 4; }
+        if (opt_odt4.some.hour != 7) { ret 4; }
+        val opt_ldt2: opt[LocalDatetime] = get_local_datetime(?t, "ldt2");
+        if (sel opt_ldt2.none)               { ret 5; }
+        if (opt_ldt2.some.nsec != 999999000) { ret 5; }
+        val opt_ld1: opt[Date] = get_local_date(?t, "ld1");
+        if (sel opt_ld1.none)       { ret 6; }
+        if (opt_ld1.some.day != 27) { ret 6; }
+        val opt_lt2: opt[TimeOfDay] = get_local_time(?t, "lt2");
+        if (sel opt_lt2.none)                                            { ret 7; }
+        if (opt_lt2.some.minute != 32 || opt_lt2.some.nsec != 999999000) { ret 7; }
+        val opt_as_date: opt[Date] = get_local_date(?t, "odt1");
+        if (sel opt_as_date.some) { ret 8; }
+
+        val opt_mixed: opt[*Array] = get_array(?t, "mixed");
+        if (sel opt_mixed.none)             { ret 9; }
+        if (array_len(opt_mixed.some) != 3) { ret 9; }
+        val opt_third: opt[*Value] = array_get(opt_mixed.some, 2);
+        if (sel opt_third.none)                        { ret 10; }
+        if (opt_third.some.tag != TYPE_LOCAL_DATETIME) { ret 10; }
+        val opt_leap: opt[Datetime] = get_offset_datetime(?t, "in.at");
+        if (sel opt_leap.none)          { ret 11; }
+        if (opt_leap.some.second != 60) { ret 11; }
+        ret 0;
+    }
+
+    # every branch of the grammar, refused at the byte that breaks it or the
+    # field out of range, in the toml-test suite's categories: each field one
+    # past its range or at zero, the 29th and 30th of February, a leap second
+    # away from a UTC month's end, an offset hour or minute past its range, a
+    # missing leading zero, missing seconds, a missing separator, a trailing T,
+    # a fifth year digit, a fraction dot with no digit, and a local time with
+    # an offset
+    test toml__date_and_time_refusals {
+        var a: Allocator;
+        page.make(?a);
+        if (!syntax_at(?a, "x = 2006-13-01\n", 9))                 { ret 1; }
+        if (!syntax_at(?a, "x = 2007-00-01\n", 9))                 { ret 2; }
+        if (!syntax_at(?a, "x = 2006-01-32\n", 12))                { ret 3; }
+        if (!syntax_at(?a, "x = 2006-01-00\n", 12))                { ret 4; }
+        if (!syntax_at(?a, "x = 2023-02-29\n", 12))                { ret 5; }
+        if (!syntax_at(?a, "x = 1988-02-30\n", 12))                { ret 6; }
+        if (!syntax_at(?a, "x = 2006-01-01T24:00:00Z\n", 15))      { ret 7; }
+        if (!syntax_at(?a, "x = 2006-01-01T00:60:00Z\n", 18))      { ret 8; }
+        if (!syntax_at(?a, "x = 2006-01-01T00:00:61Z\n", 21))      { ret 9; }
+        if (!syntax_at(?a, "x = 2006-01-01T00:00:60Z\n", 21))      { ret 10; }
+        if (!syntax_at(?a, "x = 2006-01-01T00:00:00+24:00\n", 24)) { ret 11; }
+        if (!syntax_at(?a, "x = 2006-01-01T00:00:00+00:60\n", 27)) { ret 12; }
+        if (!syntax_at(?a, "x = 1987-7-05T17:45:00Z\n", 10))       { ret 13; }
+        if (!syntax_at(?a, "x = 1987-07-05T17:45Z\n", 20))         { ret 14; }
+        if (!syntax_at(?a, "x = 1987-07-0517:45:00Z\n", 14))       { ret 15; }
+        if (!syntax_at(?a, "x = 1987-07-05T\n", 15))               { ret 16; }
+        if (!syntax_at(?a, "x = 10000-01-01\n", 9))                { ret 17; }
+        if (!syntax_at(?a, "x = 1987-07-05T17:45:00.Z\n", 24))     { ret 18; }
+        if (!syntax_at(?a, "x = 24:00:00\n", 4))                   { ret 19; }
+        if (!syntax_at(?a, "x = 07:32:00Z\n", 12))                 { ret 20; }
+        if (!syntax_at(?a, "x = 7:32:00\n", 5))                    { ret 21; }
         ret 0;
     }
 

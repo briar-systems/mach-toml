@@ -1,5 +1,9 @@
 # typed reads of a parsed tree by dotted path and by index
 
+use std.chrono.date.Date;
+use std.chrono.date.Datetime;
+use std.chrono.date.LocalDatetime;
+use std.chrono.date.TimeOfDay;
 use std.memory;
 use std.types.bool.bool;
 use std.types.option.opt;
@@ -12,6 +16,10 @@ use toml.value.TYPE_ARRAY;
 use toml.value.TYPE_BOOL;
 use toml.value.TYPE_FLOAT;
 use toml.value.TYPE_INTEGER;
+use toml.value.TYPE_LOCAL_DATE;
+use toml.value.TYPE_LOCAL_DATETIME;
+use toml.value.TYPE_LOCAL_TIME;
+use toml.value.TYPE_OFFSET_DATETIME;
 use toml.value.TYPE_STRING;
 use toml.value.TYPE_TABLE;
 use toml.value.Table;
@@ -138,6 +146,50 @@ pub fun get_bool(t: *Table, path: str) opt[bool] {
     val v: *Value = get_typed(t, path, TYPE_BOOL);
     if (v == nil) { ret opt[bool].none{}; }
     ret opt[bool].some{v.data.boolean};
+}
+
+# look up an offset date-time by dotted path
+# ---
+# t:    root table
+# path: dotted key path
+# ret:  the datetime with its offset, or none if not found or wrong type
+pub fun get_offset_datetime(t: *Table, path: str) opt[Datetime] {
+    val v: *Value = get_typed(t, path, TYPE_OFFSET_DATETIME);
+    if (v == nil) { ret opt[Datetime].none{}; }
+    ret opt[Datetime].some{v.data.offset_datetime};
+}
+
+# look up a local date-time by dotted path
+# ---
+# t:    root table
+# path: dotted key path
+# ret:  the local datetime, or none if not found or wrong type
+pub fun get_local_datetime(t: *Table, path: str) opt[LocalDatetime] {
+    val v: *Value = get_typed(t, path, TYPE_LOCAL_DATETIME);
+    if (v == nil) { ret opt[LocalDatetime].none{}; }
+    ret opt[LocalDatetime].some{v.data.local_datetime};
+}
+
+# look up a local date by dotted path
+# ---
+# t:    root table
+# path: dotted key path
+# ret:  the date, or none if not found or wrong type
+pub fun get_local_date(t: *Table, path: str) opt[Date] {
+    val v: *Value = get_typed(t, path, TYPE_LOCAL_DATE);
+    if (v == nil) { ret opt[Date].none{}; }
+    ret opt[Date].some{v.data.local_date};
+}
+
+# look up a local time by dotted path
+# ---
+# t:    root table
+# path: dotted key path
+# ret:  the time of day, or none if not found or wrong type
+pub fun get_local_time(t: *Table, path: str) opt[TimeOfDay] {
+    val v: *Value = get_typed(t, path, TYPE_LOCAL_TIME);
+    if (v == nil) { ret opt[TimeOfDay].none{}; }
+    ret opt[TimeOfDay].some{v.data.local_time};
 }
 
 # look up a sub-table by dotted path

@@ -8,6 +8,8 @@ use std.types.error.err;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
+use toml.datetime.is_datetime_start;
+use toml.datetime.parse_datetime;
 use toml.error.TomlError;
 use toml.error.at;
 use toml.key.define_key;
@@ -112,6 +114,10 @@ fun parse_value_literal(a: *Allocator, src: str, i: *usize, depth: usize) res[Va
 
     if (b == '{') {
         ret parse_inline_table(a, src, i, depth + 1);
+    }
+
+    if (is_datetime_start(src, @i)) {
+        ret parse_datetime(src, i);
     }
 
     if (b == '+' || b == '-' || (b >= '0' && b <= '9') || b == 'i' || b == 'n') {

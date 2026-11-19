@@ -1,0 +1,74 @@
+# date and time literals: offset and local date-times, local dates and times
+#
+# the four are RFC 3339's forms as TOML 1.0 takes them ("Offset Date-Time",
+# "Local Date-Time", "Local Date", "Local Time"), read by the standard library's
+# one RFC 3339 reader into its own types. that reader takes T, t or a space
+# between date and time, Z or z for UTC, any number of fraction digits with
+# those past the ninth dropped (TOML 1.0: "the additional precision must be
+# truncated, not rounded"), and refuses a field out of its range rather than
+# normalizing it
+
+use std.chrono.format.ReadError;
+use std.chrono.format.Stamp;
+use std.chrono.format.StampRead;
+use std.chrono.format.read_rfc3339;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use toml.error.TomlError;
+use toml.value.Value;
+use toml.value.value_fail;
+use toml.value.value_local_date;
+use toml.value.value_local_datetime;
+use toml.value.value_local_time;
+use toml.value.value_offset_datetime;
+use toml.value.value_ok;
+
+fun is_digit(b: u8) bool {
+    ret b >= '0' && b <= '9';
+}
+
+# whether a date or time literal starts at src[at], by the grammar: a full-date
+# opens with four digits and a dash, a partial-time with two digits and a
+# colon, and neither is ever the start of an integer or a float
+pub fun is_datetime_start(src: str, at: usize) bool {
+    if (!is_digit(src[at]) || !is_digit(src[at + 1])) { ret false; }
+    if (src[at + 2] == ':')                           { ret true; }
+    ret is_digit(src[at + 2]) && is_digit(src[at + 3]) && src[at + 4] == '-';
+}
+
+# the bytes from src[at] to the end of its line: a literal never spans one
+fun line_len(src: str, at: usize) usize {
+    var n: usize = 0;
+    for (src[at + n] != 0 && src[at + n] != '\n' && src[at + n] != '\r') {
+        n = n + 1;
+    }
+    ret n;
+}
+
+# parse a date or time literal, the cursor on its first digit
+# ---
+# src: source text
+# i:   cursor position, left past the literal
+# ret: the value as the standard library's type for its kind, or a syntax
+#      failure at the byte that breaks the grammar or the field out of range
+pub fun parse_datetime(src: str, i: *usize) res[Value, TomlError] {
+    val at:       usize                     = @i;
+    val res_read: res[StampRead, ReadError] = read_rfc3339((src::usize + at)::*u8, line_len(src, at));
+    if (sel res_read.err) {
+        val e: ReadError = res_read.err;
+        if (sel e.syntax) { ret value_fail(TomlError.syntax{at + e.syntax}); }
+        ret value_fail(TomlError.syntax{at + e.range});
+    }
+    @i = at + res_read.ok.size;
+    val stamp: Stamp = res_read.ok.stamp;
+    if (sel stamp.datetime) { ret value_ok(value_offset_datetime(stamp.datetime)); }
+    if (sel stamp.local)    { ret value_ok(value_local_datetime(stamp.local)); }
+    if (sel stamp.date)     { ret value_ok(value_local_date(stamp.date)); }
+    if (sel stamp.time)     { ret value_ok(value_local_time(stamp.time)); }
+    # the reader answers one of the four, so this is never reached
+    ret value_fail(TomlError.syntax{at});
+}

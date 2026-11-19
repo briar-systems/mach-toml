@@ -1,23 +1,41 @@
-# encoding a string as the body of a TOML basic string
+# encoding a string as the body of a TOML basic string, and a date or time
+# value as its literal
 
 use std.allocator.Allocator;
 use std.allocator.Error;
 use std.allocator.allocate;
+use std.chrono.format.Fraction;
+use std.chrono.format.rfc3339;
+use std.chrono.format.rfc3339_date;
+use std.chrono.format.rfc3339_local;
+use std.chrono.format.rfc3339_time;
 use std.system.capability;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_len;
+use toml.value.TYPE_LOCAL_DATE;
+use toml.value.TYPE_LOCAL_DATETIME;
+use toml.value.TYPE_LOCAL_TIME;
+use toml.value.TYPE_OFFSET_DATETIME;
+use toml.value.Value;
 
 $if (capability.HOSTED) {
     use std.allocator.page;
     use std_format: std.format;
+    use std.memory;
+    use std.types.bool.bool;
+    use std.types.bool.false;
     use std.types.option.opt;
     use std.types.string.str_equals;
     use toml.error.TomlError;
+    use toml.lookup.get;
     use toml.lookup.get_str;
     use toml.parse.parse;
+    use toml.tree.dnit;
     use toml.value.Table;
+    use toml.value.table_init;
+    use toml.value.value_table;
 }
 
 # the body of a TOML basic string holding `s`: backslash, quote and control
@@ -48,6 +66,33 @@ pub fun escape(a: *Allocator, s: str) res[str, Error] {
     }
     buf[k] = 0;
     ret res[str, Error].ok{buf::str};
+}
+
+# the buffer datetime_literal needs for a literal of any of the four kinds,
+# its NUL included
+pub val DATETIME_LITERAL_MAX: usize = 36;
+
+# write a date or time value as the TOML literal that parses back to it
+#
+# the standard library's RFC 3339 formatters write it: T between date and
+# time, Z for a known offset of zero, -00:00 for an unknown one, and the
+# fraction of a second in as few digits as hold it, which is no more than
+# parses back to the same value
+# ---
+# v:   a value of one of the four date and time types
+# buf: output buffer (DATETIME_LITERAL_MAX bytes hold any literal)
+# len: buffer length
+# ret: bytes written (excluding the NUL), 0 when v is not a date or time
+#      value, its fields are out of range or have no RFC 3339 spelling (a
+#      year past four digits, an offset that is not whole minutes), or buf is
+#      shorter than its formatter asks
+pub fun datetime_literal(v: *Value, buf: *u8, len: usize) usize {
+    val shortest: Fraction = Fraction.shortest{};
+    if (v.tag == TYPE_OFFSET_DATETIME) { ret rfc3339(v.data.offset_datetime, shortest, buf, len); }
+    if (v.tag == TYPE_LOCAL_DATETIME)  { ret rfc3339_local(v.data.local_datetime, shortest, buf, len); }
+    if (v.tag == TYPE_LOCAL_DATE)      { ret rfc3339_date(v.data.local_date, buf, len); }
+    if (v.tag == TYPE_LOCAL_TIME)      { ret rfc3339_time(v.data.local_time, shortest, buf, len); }
+    ret 0;
 }
 
 # the short escape letter of `c` in a basic string, 0 when it has none
@@ -109,6 +154,56 @@ $if (capability.HOSTED) {
         val opt_str: opt[str] = get_str(?t, "v");
         if (!sel opt_str.some)                { ret 5; }
         if (!str_equals(opt_str.some, value)) { ret 6; }
+        ret 0;
+    }
+
+    # whether document `doc` sets x to a date or time value the writer spells
+    # `want`, and `x = want` parses to a value it spells the same way
+    #[testing]
+    fun datetime_writes(a: *Allocator, doc: str, want: str) bool {
+        var first: [48]u8;
+        var again: [48]u8;
+        if (!datetime_spelling(a, doc, (?first)::*u8)) { ret false; }
+        if (!str_equals((?first)::*u8::str, want))     { ret false; }
+        var line: [48]u8;
+        line[0] = 'x';
+        line[1] = ' ';
+        line[2] = '=';
+        line[3] = ' ';
+        memory.raw_copy(((?line)::*u8::usize + 4)::ptr, (?first)::ptr, str_len(want) + 1);
+        if (!datetime_spelling(a, (?line)::*u8::str, (?again)::*u8)) { ret false; }
+        ret str_equals((?again)::*u8::str, want);
+    }
+
+    # write the literal of document `doc`'s x into `out`, which holds 48 bytes
+    #[testing]
+    fun datetime_spelling(a: *Allocator, doc: str, out: *u8) bool {
+        val res_parse: res[Table, TomlError] = parse(a, doc);
+        if (sel res_parse.err) { ret false; }
+        var t: Table = res_parse.ok;
+        fin { dnit(a, ?t); }
+        val opt_x: opt[*Value] = get(?t, "x");
+        if (sel opt_x.none) { ret false; }
+        ret datetime_literal(opt_x.some, out, DATETIME_LITERAL_MAX) != 0;
+    }
+
+    # each kind written back parses to a value written the same way: T for a
+    # space, Z for z and for +00:00, -00:00 kept as the unknown offset, a
+    # fraction in its shortest digits, a leap second, the extreme years
+    test toml__dates_and_times_round_trip {
+        var a: Allocator;
+        page.make(?a);
+        if (!datetime_writes(?a, "x = 1979-05-27 00:32:00.999999-07:00", "1979-05-27T00:32:00.999999-07:00")) { ret 1; }
+        if (!datetime_writes(?a, "x = 1979-05-27t07:32:00z", "1979-05-27T07:32:00Z"))                         { ret 2; }
+        if (!datetime_writes(?a, "x = 1979-05-27T07:32:00-00:00", "1979-05-27T07:32:00-00:00"))               { ret 3; }
+        if (!datetime_writes(?a, "x = 1990-12-31T15:59:60.5-08:00", "1990-12-31T15:59:60.5-08:00"))           { ret 4; }
+        if (!datetime_writes(?a, "x = 0000-01-01T00:00:00.100", "0000-01-01T00:00:00.1"))                     { ret 5; }
+        if (!datetime_writes(?a, "x = 9999-12-31", "9999-12-31"))                                             { ret 6; }
+        if (!datetime_writes(?a, "x = 23:59:60.1234567891", "23:59:60.123456789"))                            { ret 7; }
+        if (!datetime_writes(?a, "x = 1979-05-27T07:32:00+00:00", "1979-05-27T07:32:00Z"))                    { ret 10; }
+        if (!datetime_writes(?a, "x = 00:00:00", "00:00:00"))                                                 { ret 8; }
+        var v: Value = value_table(table_init());
+        if (datetime_literal(?v, nil, 0) != 0) { ret 9; }
         ret 0;
     }
 }

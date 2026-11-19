@@ -1,5 +1,9 @@
 # the value model a parse builds: tagged values, tables and arrays
 
+use std.chrono.date.Date;
+use std.chrono.date.Datetime;
+use std.chrono.date.LocalDatetime;
+use std.chrono.date.TimeOfDay;
 use std.types.bool.bool;
 use std.types.result.res;
 use std.types.size.usize;
@@ -12,6 +16,12 @@ pub val TYPE_FLOAT:   u8 = 2;
 pub val TYPE_BOOL:    u8 = 3;
 pub val TYPE_ARRAY:   u8 = 4;
 pub val TYPE_TABLE:   u8 = 5;
+# the four date and time types (TOML 1.0, "Offset Date-Time" to "Local Time"),
+# each held as the standard library's own type for it
+pub val TYPE_OFFSET_DATETIME: u8 = 6;
+pub val TYPE_LOCAL_DATETIME:  u8 = 7;
+pub val TYPE_LOCAL_DATE:      u8 = 8;
+pub val TYPE_LOCAL_TIME:      u8 = 9;
 
 # what may still extend a table or array, kept by the parse (TOML 1.0 forbids
 # defining a key or table twice): a header may define an implicit table once,
@@ -60,6 +70,10 @@ pub rec Value {
         boolean: bool;
         array: Array;
         table: Table;
+        offset_datetime: Datetime;
+        local_datetime: LocalDatetime;
+        local_date: Date;
+        local_time: TimeOfDay;
     };
 }
 
@@ -158,6 +172,42 @@ pub fun value_bool(b: bool) Value {
     v.span         = span_none();
     v.key          = span_none();
     v.data.boolean = b;
+    ret v;
+}
+
+pub fun value_offset_datetime(dt: Datetime) Value {
+    var v: Value;
+    v.tag                  = TYPE_OFFSET_DATETIME;
+    v.span                 = span_none();
+    v.key                  = span_none();
+    v.data.offset_datetime = dt;
+    ret v;
+}
+
+pub fun value_local_datetime(ldt: LocalDatetime) Value {
+    var v: Value;
+    v.tag                 = TYPE_LOCAL_DATETIME;
+    v.span                = span_none();
+    v.key                 = span_none();
+    v.data.local_datetime = ldt;
+    ret v;
+}
+
+pub fun value_local_date(d: Date) Value {
+    var v: Value;
+    v.tag             = TYPE_LOCAL_DATE;
+    v.span            = span_none();
+    v.key             = span_none();
+    v.data.local_date = d;
+    ret v;
+}
+
+pub fun value_local_time(t: TimeOfDay) Value {
+    var v: Value;
+    v.tag             = TYPE_LOCAL_TIME;
+    v.span            = span_none();
+    v.key             = span_none();
+    v.data.local_time = t;
     ret v;
 }
 
