@@ -1,0 +1,52 @@
+# TOML 1.0 parser and accessor API, the modules the prebuilt toml artifact carries
+#
+# parses TOML documents into a tree of tables, arrays, and values.
+# all memory is owned by the provided allocator (typically an arena).
+#
+# a parse reports a TomlError: syntax, an integer that does not fit, nesting
+# past the bound and a key or table defined twice are
+# distinct, each positioned at the byte offset in the document, and a refused
+# allocation is the allocator's own error. a parse that fails part way
+# releases everything it acquired before reporting.
+
+# the startup a test dispatcher of this library links
+use std.runtime;
+
+fwd toml.value.TYPE_STRING;
+fwd toml.value.TYPE_INTEGER;
+fwd toml.value.TYPE_FLOAT;
+fwd toml.value.TYPE_BOOL;
+fwd toml.value.TYPE_ARRAY;
+fwd toml.value.TYPE_TABLE;
+fwd toml.value.TYPE_OFFSET_DATETIME;
+fwd toml.value.TYPE_LOCAL_DATETIME;
+fwd toml.value.TYPE_LOCAL_DATE;
+fwd toml.value.TYPE_LOCAL_TIME;
+fwd toml.error.TomlError;
+fwd toml.value.Span;
+fwd toml.value.Value;
+fwd toml.value.Array;
+fwd toml.value.Table;
+fwd toml.tree.dnit;
+fwd toml.lookup.get;
+fwd toml.lookup.get_str;
+fwd toml.lookup.get_int;
+fwd toml.lookup.get_float;
+fwd toml.lookup.get_bool;
+fwd toml.lookup.get_offset_datetime;
+fwd toml.lookup.get_local_datetime;
+fwd toml.lookup.get_local_date;
+fwd toml.lookup.get_local_time;
+fwd toml.lookup.get_table;
+fwd toml.lookup.get_array;
+fwd toml.lookup.array_get;
+fwd toml.lookup.table_len;
+fwd toml.lookup.table_key;
+fwd toml.lookup.table_value;
+fwd toml.lookup.array_len;
+fwd toml.expr.MAX_VALUE_DEPTH;
+fwd toml.parse.parse;
+fwd toml.parse.parse_bytes;
+fwd toml.write.escape;
+fwd toml.write.DATETIME_LITERAL_MAX;
+fwd toml.write.datetime_literal;

@@ -1,0 +1,134 @@
+# key paths: scanning them and navigating the tree they name
+
+use std.allocator.Allocator;
+use std.allocator.Error;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use toml.error.TomlError;
+use toml.lookup.table_find;
+use toml.scan.is_bare_key_char;
+use toml.scan.skip_ws;
+use toml.string.alloc_str;
+use toml.string.parse_basic_string;
+use toml.string.parse_literal_string;
+use toml.string.text_alloc;
+use toml.string.text_fail;
+use toml.tree.KeySegs;
+use toml.tree.free_str;
+use toml.tree.keysegs_push;
+use toml.tree.table_add_subtable;
+use toml.tree.table_insert;
+use toml.value.ORIGIN_DOTTED;
+use toml.value.ORIGIN_IMPLICIT;
+use toml.value.TYPE_TABLE;
+use toml.value.Table;
+use toml.value.Value;
+use toml.value.span_from;
+
+# parse a single key segment (bare, quoted, or literal)
+# ---
+# a:   allocator
+# src: source text
+# i:   cursor position
+# ret: the key string, or the failure
+fun parse_key_segment(a: *Allocator, src: str, i: *usize) res[str, TomlError] {
+    # a quoted key is a single-line string, never a multi-line one
+    val q: u8 = src[@i];
+    if ((q == '"' || q == '\'') && src[@i + 1] == q && src[@i + 2] == q) { ret text_fail(TomlError.syntax{@i}); }
+    if (q == '"') {
+        ret parse_basic_string(a, src, i);
+    }
+    if (q == '\'') {
+        ret parse_literal_string(a, src, i);
+    }
+
+    val start: usize = @i;
+    for (is_bare_key_char(src[@i])) {
+        @i = @i + 1;
+    }
+    if (@i == start) { ret text_fail(TomlError.syntax{@i}); }
+    val res_copied: res[str, Error] = alloc_str(a, src, start, @i - start);
+    if (sel res_copied.err) { ret text_alloc(res_copied.err); }
+    ret res[str, TomlError].ok{res_copied.ok};
+}
+
+# parse a possibly-dotted key into segments
+#
+# handles bare keys, quoted keys, and mixed dotted keys like a."b".c.
+# each segment is stored independently, preserving literal dots in
+# quoted keys. the caller owns `ks` and releases it however this returns, so
+# a segment parsed before a failure is never stranded.
+# ---
+# a:   allocator
+# src: source text
+# i:   cursor position, left past the key and the whitespace after it
+# ks:  the segment list to fill, empty on entry
+# ret: ok, or the failure
+pub fun parse_key_path(a: *Allocator, src: str, i: *usize, ks: *KeySegs) err[TomlError] {
+    val first_at:  usize               = @i;
+    val res_first: res[str, TomlError] = parse_key_segment(a, src, i);
+    if (sel res_first.err) { ret err[TomlError].err{res_first.err}; }
+
+    val err_keysegs_push: err[Error] = keysegs_push(a, ks, res_first.ok, span_from(first_at, @i));
+    if (sel err_keysegs_push.err) {
+        free_str(a, res_first.ok);
+        ret err[TomlError].err{TomlError.alloc{err_keysegs_push.err}};
+    }
+
+    # whitespace around a dot is ignored (TOML 1.0, "Keys")
+    for {
+        skip_ws(src, i);
+        if (src[@i] != '.') { brk; }
+        @i = @i + 1;
+        skip_ws(src, i);
+        val seg_at:  usize               = @i;
+        val res_seg: res[str, TomlError] = parse_key_segment(a, src, i);
+        if (sel res_seg.err) { ret err[TomlError].err{res_seg.err}; }
+
+        val err_keysegs_push: err[Error] = keysegs_push(a, ks, res_seg.ok, span_from(seg_at, @i));
+        if (sel err_keysegs_push.err) {
+            free_str(a, res_seg.ok);
+            ret err[TomlError].err{TomlError.alloc{err_keysegs_push.err}};
+        }
+    }
+
+    ret err[TomlError].ok{};
+}
+
+# define a dotted key's value in a table
+#
+# the inner segments walk tables, creating each one missing. dotted keys extend
+# only a table dotted keys made or entered, or one a header named implicitly,
+# which they then claim: a table a header defined and a literal are closed to
+# them (TOML 1.0, "Table"). the last segment must not be defined yet ("Keys").
+# ---
+# a:    allocator for new tables
+# t:    the table the key is relative to
+# ks:   the key's segments
+# val_: the value; it stays the caller's when this fails
+# ret:  ok, or the failure (a conflict unpositioned)
+pub fun define_key(a: *Allocator, t: *Table, ks: *KeySegs, val_: Value) err[TomlError] {
+    var current: *Table = t;
+    var i:       usize  = 0;
+    for (i < ks.len - 1) {
+        val existing: *Value = table_find(current, ks.segs[i]);
+        if (existing == nil) {
+            val res_table_add_subtable: res[*Value, TomlError] = table_add_subtable(a, current, ks.segs[i], ks.spans[i], ORIGIN_DOTTED);
+            if (sel res_table_add_subtable.err) { ret err[TomlError].err{res_table_add_subtable.err}; }
+            current = ?res_table_add_subtable.ok.data.table;
+        }
+        or {
+            if (existing.tag != TYPE_TABLE)         { ret err[TomlError].err{TomlError.conflict{0}}; }
+            if (existing.origin == ORIGIN_IMPLICIT) { existing.origin = ORIGIN_DOTTED; }
+            or (existing.origin != ORIGIN_DOTTED)   { ret err[TomlError].err{TomlError.conflict{0}}; }
+            current = ?existing.data.table;
+        }
+        i = i + 1;
+    }
+    if (table_find(current, ks.segs[ks.len - 1]) != nil) { ret err[TomlError].err{TomlError.conflict{0}}; }
+    val err_table_insert: err[Error] = table_insert(a, current, ks.segs[ks.len - 1], val_);
+    if (sel err_table_insert.err) { ret err[TomlError].err{TomlError.alloc{err_table_insert.err}}; }
+    ret err[TomlError].ok{};
+}

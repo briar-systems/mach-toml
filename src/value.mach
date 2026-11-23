@@ -1,0 +1,238 @@
+# the value model a parse builds: tagged values, tables and arrays
+
+use std.chrono.date.Date;
+use std.chrono.date.Datetime;
+use std.chrono.date.LocalDatetime;
+use std.chrono.date.TimeOfDay;
+use std.types.bool.bool;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use toml.error.TomlError;
+
+pub val TYPE_STRING:  u8 = 0;
+pub val TYPE_INTEGER: u8 = 1;
+pub val TYPE_FLOAT:   u8 = 2;
+pub val TYPE_BOOL:    u8 = 3;
+pub val TYPE_ARRAY:   u8 = 4;
+pub val TYPE_TABLE:   u8 = 5;
+# the four date and time types (TOML 1.0, "Offset Date-Time" to "Local Time"),
+# each held as the standard library's own type for it
+pub val TYPE_OFFSET_DATETIME: u8 = 6;
+pub val TYPE_LOCAL_DATETIME:  u8 = 7;
+pub val TYPE_LOCAL_DATE:      u8 = 8;
+pub val TYPE_LOCAL_TIME:      u8 = 9;
+
+# what may still extend a table or array, kept by the parse (TOML 1.0 forbids
+# defining a key or table twice): a header may define an implicit table once,
+# dotted keys extend only what dotted keys made or entered, and nothing extends
+# a literal. a later section's dotted keys never reach an earlier section's: the
+# path from below its own table to them passes through a table a header defined
+pub val ORIGIN_IMPLICIT: u8 = 0; # named only as a header's inner segment, or not parsed
+pub val ORIGIN_DEFINED:  u8 = 1; # defined by a header, or appended by [[header]]
+pub val ORIGIN_DOTTED:   u8 = 2; # made or entered by dotted keys
+pub val ORIGIN_LITERAL:  u8 = 3; # written as a value: an inline table or an array
+
+# a byte range of the document handed to `parse`
+# ---
+# at:  offset of the first byte, as `TomlError` positions its failures
+# len: byte count; a span of length 0 at offset 0 means "not parsed"
+pub rec Span {
+    at:  usize;
+    len: usize;
+}
+
+# tagged TOML value
+#
+# a parsed value records where it came from. `span` is the literal as written:
+# the quotes of a string, the brackets of an array or inline table, the whole
+# `[header]` or `[[header]]` line for a table a header defined, or the key token
+# that created a table implicitly (a dotted key's inner segment, a header's
+# inner segment). `key` is the key token that maps to this value in its table,
+# the last segment of a dotted key as written, quotes included. an array
+# element has no key of its own and carries the `[[header]]`'s final segment
+# when a header appended it, else the zero span. a value not produced by
+# `parse` carries the zero span in both.
+# ---
+# tag:    type discriminator (TYPE_*)
+# origin: how a parse came to hold a table or array (ORIGIN_*)
+# span:   the value's literal in the source
+# key:    the key token that maps to it
+pub rec Value {
+    tag:    u8;
+    origin: u8;
+    span:   Span;
+    key:    Span;
+    data:   uni {
+        string: str;
+        integer: i64;
+        float: f64;
+        boolean: bool;
+        array: Array;
+        table: Table;
+        offset_datetime: Datetime;
+        local_datetime: LocalDatetime;
+        local_date: Date;
+        local_time: TimeOfDay;
+    };
+}
+
+# ordered list of TOML values
+# ---
+# items: pointer to Value array (ptr to break recursion)
+# len:   number of elements
+# cap:   allocated capacity
+pub rec Array {
+    items: ptr;
+    len:   usize;
+    cap:   usize;
+}
+
+# ordered map of string keys to TOML values
+#
+# a key's source position lives on the value it maps to (`Value.key`), so one
+# `get` answers both where the key and where its value were written.
+# ---
+# keys:   pointer to str array (parallel with values)
+# values: pointer to Value array
+# len:    number of entries
+# cap:    allocated capacity
+pub rec Table {
+    keys:   ptr;
+    values: ptr;
+    len:    usize;
+    cap:    usize;
+}
+
+# create an empty table with nil backing storage
+pub fun table_init() Table {
+    var t: Table;
+    t.keys   = nil;
+    t.values = nil;
+    t.len    = 0;
+    t.cap    = 0;
+    ret t;
+}
+
+# create an empty array with nil backing storage
+pub fun array_init() Array {
+    var a: Array;
+    a.items = nil;
+    a.len   = 0;
+    a.cap   = 0;
+    ret a;
+}
+
+# the zero span: not parsed
+fun span_none() Span {
+    var sp: Span;
+    sp.at  = 0;
+    sp.len = 0;
+    ret sp;
+}
+
+# the bytes from `start` to the cursor
+pub fun span_from(start: usize, end: usize) Span {
+    var sp: Span;
+    sp.at  = start;
+    sp.len = end - start;
+    ret sp;
+}
+
+pub fun value_string(s: str) Value {
+    var v: Value;
+    v.tag         = TYPE_STRING;
+    v.span        = span_none();
+    v.key         = span_none();
+    v.data.string = s;
+    ret v;
+}
+
+pub fun value_int(n: i64) Value {
+    var v: Value;
+    v.tag          = TYPE_INTEGER;
+    v.span         = span_none();
+    v.key          = span_none();
+    v.data.integer = n;
+    ret v;
+}
+
+pub fun value_float(f: f64) Value {
+    var v: Value;
+    v.tag        = TYPE_FLOAT;
+    v.span       = span_none();
+    v.key        = span_none();
+    v.data.float = f;
+    ret v;
+}
+
+pub fun value_bool(b: bool) Value {
+    var v: Value;
+    v.tag          = TYPE_BOOL;
+    v.span         = span_none();
+    v.key          = span_none();
+    v.data.boolean = b;
+    ret v;
+}
+
+pub fun value_offset_datetime(dt: Datetime) Value {
+    var v: Value;
+    v.tag                  = TYPE_OFFSET_DATETIME;
+    v.span                 = span_none();
+    v.key                  = span_none();
+    v.data.offset_datetime = dt;
+    ret v;
+}
+
+pub fun value_local_datetime(ldt: LocalDatetime) Value {
+    var v: Value;
+    v.tag                 = TYPE_LOCAL_DATETIME;
+    v.span                = span_none();
+    v.key                 = span_none();
+    v.data.local_datetime = ldt;
+    ret v;
+}
+
+pub fun value_local_date(d: Date) Value {
+    var v: Value;
+    v.tag             = TYPE_LOCAL_DATE;
+    v.span            = span_none();
+    v.key             = span_none();
+    v.data.local_date = d;
+    ret v;
+}
+
+pub fun value_local_time(t: TimeOfDay) Value {
+    var v: Value;
+    v.tag             = TYPE_LOCAL_TIME;
+    v.span            = span_none();
+    v.key             = span_none();
+    v.data.local_time = t;
+    ret v;
+}
+
+pub fun value_table(t: Table) Value {
+    var v: Value;
+    v.tag        = TYPE_TABLE;
+    v.span       = span_none();
+    v.key        = span_none();
+    v.data.table = t;
+    ret v;
+}
+
+pub fun value_array(a: Array) Value {
+    var v: Value;
+    v.tag        = TYPE_ARRAY;
+    v.span       = span_none();
+    v.key        = span_none();
+    v.data.array = a;
+    ret v;
+}
+
+pub fun value_fail(e: TomlError) res[Value, TomlError] {
+    ret res[Value, TomlError].err{e};
+}
+
+pub fun value_ok(v: Value) res[Value, TomlError] {
+    ret res[Value, TomlError].ok{v};
+}

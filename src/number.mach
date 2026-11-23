@@ -1,0 +1,243 @@
+# numeric literals: decimal, float, hex, octal and binary integers
+
+use std.math.ieee;
+use std.memory;
+use std.text.parse.F64ParseWork;
+use std.text.parse.ParseError;
+use std.text.parse.Radix;
+use std.text.parse.parse_float;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use toml.error.TomlError;
+use toml.scan.hex_digit;
+use toml.value.Value;
+use toml.value.value_fail;
+use toml.value.value_float;
+use toml.value.value_int;
+use toml.value.value_ok;
+
+# whether a byte is a decimal digit
+fun is_digit(b: u8) bool {
+    ret b >= '0' && b <= '9';
+}
+
+# the integer a sign and a magnitude denote, refused when no i64 holds it
+# ---
+# x:    the magnitude
+# sign: 1 or -1
+# at_:  where the literal starts, where an overflow is reported
+# ret:  the integer Value, or the overflow
+fun signed_int(x: u64, sign: i64, at_: usize) res[Value, TomlError] {
+    if (sign > 0) {
+        if (x > 0x7FFFFFFFFFFFFFFF) { ret value_fail(TomlError.overflow{at_}); }
+        ret value_ok(value_int(x::i64));
+    }
+    if (x > 0x8000000000000000) { ret value_fail(TomlError.overflow{at_}); }
+    if (x == 0)                 { ret value_ok(value_int(0)); }
+    ret value_ok(value_int(-((x - 1)::i64) - 1));
+}
+
+# parse an integer or float value
+# handles decimal, hex, octal, binary integers, decimal floats with
+# optional exponent, and special values inf/nan.
+# ---
+# src: source text
+# i:   cursor position
+# ret: parsed Value, or the failure
+pub fun parse_number(src: str, i: *usize) res[Value, TomlError] {
+    val at_:    usize = @i;
+    var sign:   i64   = 1;
+    var signed: bool  = false;
+    if (src[@i] == '+') {
+        signed = true;
+        @i     = @i + 1;
+    }
+    or (src[@i] == '-') {
+        sign   = -1;
+        signed = true;
+        @i     = @i + 1;
+    }
+
+    # inf
+    if (src[@i] == 'i' && src[@i + 1] == 'n' && src[@i + 2] == 'f') {
+        @i = @i + 3;
+        var bits: u64 = 0x7FF0000000000000;
+        if (sign < 0) { bits = 0xFFF0000000000000; }
+        var inf_val: f64;
+        memory.raw_copy(?inf_val, ?bits, 8);
+        ret value_ok(value_float(inf_val));
+    }
+
+    # nan
+    if (src[@i] == 'n' && src[@i + 1] == 'a' && src[@i + 2] == 'n') {
+        @i = @i + 3;
+        var bits: u64 = 0x7FF8000000000000;
+        if (sign < 0) { bits = 0xFFF8000000000000; }
+        var nan_val: f64;
+        memory.raw_copy(?nan_val, ?bits, 8);
+        ret value_ok(value_float(nan_val));
+    }
+
+    # hex, octal, binary prefixes: lowercase, and never signed
+    if (src[@i] == '0') {
+        val next: u8 = src[@i + 1];
+        if (next == 'x' || next == 'o' || next == 'b') {
+            if (signed) { ret value_fail(TomlError.syntax{at_}); }
+            @i = @i + 2;
+            if (next == 'x') { ret parse_hex_int(src, i, at_); }
+            if (next == 'o') { ret parse_oct_int(src, i, at_); }
+            ret parse_bin_int(src, i, at_);
+        }
+    }
+
+    # decimal integer or float: an underscore sits between digits, and a
+    # leading zero stands alone
+    val first_at: usize = @i;
+    var x:        u64   = 0;
+    var digits:   usize = 0;
+    var past_u64: bool  = false;
+    for {
+        val b: u8 = src[@i];
+        if (b == '_') {
+            if (digits == 0 || !is_digit(src[@i + 1])) { ret value_fail(TomlError.syntax{@i}); }
+            @i = @i + 1;
+            cnt;
+        }
+        if (!is_digit(b)) { brk; }
+        digits = digits + 1;
+        # a float's integer part may pass u64, an integer's never can
+        val digit: u64 = (b - '0')::u64;
+        if (x > 18446744073709551615 / 10 || digit > 18446744073709551615 - x * 10) { past_u64 = true; }
+        or                                                                          { x = x * 10 + digit; }
+        @i = @i + 1;
+    }
+
+    if (digits == 0)                        { ret value_fail(TomlError.syntax{@i}); }
+    if (digits > 1 && src[first_at] == '0') { ret value_fail(TomlError.syntax{first_at}); }
+
+    var is_float: bool = false;
+    if (src[@i] == '.' && is_digit(src[@i + 1])) {
+        @i = @i + 1;
+        if (!scan_digits(src, i)) { ret value_fail(TomlError.syntax{@i}); }
+        is_float = true;
+    }
+    if (src[@i] == 'e' || src[@i] == 'E') {
+        @i = @i + 1;
+        if (src[@i] == '+' || src[@i] == '-') { @i = @i + 1; }
+        if (!is_digit(src[@i]))               { ret value_fail(TomlError.syntax{@i}); }
+        if (!scan_digits(src, i))             { ret value_fail(TomlError.syntax{@i}); }
+        is_float = true;
+    }
+    if (is_float) { ret decimal_float(src, at_, @i); }
+
+    if (past_u64) { ret value_fail(TomlError.overflow{at_}); }
+    ret signed_int(x, sign, at_);
+}
+
+# scan a run of digits with each underscore between two of them, the cursor on
+# its first digit
+# ---
+# src: source text
+# i:   cursor position, left past the run, or on an underscore no digit follows
+# ret: whether every underscore sat between digits
+fun scan_digits(src: str, i: *usize) bool {
+    for {
+        val b: u8 = src[@i];
+        if (b == '_') {
+            if (!is_digit(src[@i + 1])) { ret false; }
+            @i = @i + 1;
+            cnt;
+        }
+        if (!is_digit(b)) { ret true; }
+        @i = @i + 1;
+    }
+}
+
+# the float a decimal literal TOML's grammar has accepted denotes, correctly
+# rounded to binary64 by the standard library's one decimal conversion
+# ---
+# src:  source text
+# from: where the literal starts, at its sign if it has one
+# to:   one past its last byte
+# ret:  the float Value, or the failure
+fun decimal_float(src: str, from: usize, to: usize) res[Value, TomlError] {
+    var work:            F64ParseWork;
+    val res_parse_float: res[u128, ParseError] = parse_float(ieee.F64, Radix.decimal{}, (src::usize + from)::str, to - from, true, (?work)::*u32);
+    if (sel res_parse_float.err) {
+        val e: ParseError = res_parse_float.err;
+        if (sel e.syntax) { ret value_fail(TomlError.syntax{from + e.syntax}); }
+        ret value_fail(TomlError.syntax{from});
+    }
+    ret value_ok(value_float(res_parse_float.ok::u64:~f64));
+}
+
+# parse hexadecimal digits into an integer value
+fun parse_hex_int(src: str, i: *usize, at_: usize) res[Value, TomlError] {
+    var x:   u64  = 0;
+    var any: bool = false;
+    for {
+        val b: u8 = src[@i];
+        if (b == '_') {
+            if (!any || hex_digit(src[@i + 1]) < 0) { ret value_fail(TomlError.syntax{@i}); }
+            @i = @i + 1;
+            cnt;
+        }
+        val d: i32 = hex_digit(b);
+        if (d < 0) { brk; }
+        any = true;
+        if (x > 0x0FFFFFFFFFFFFFFF) { ret value_fail(TomlError.overflow{at_}); }
+        x  = (x << 4) | d::u32::u64;
+        @i = @i + 1;
+    }
+    if (!any)                   { ret value_fail(TomlError.syntax{@i}); }
+    if (x > 0x7FFFFFFFFFFFFFFF) { ret value_fail(TomlError.overflow{at_}); }
+    ret value_ok(value_int(x::i64));
+}
+
+# parse octal digits into an integer value
+fun parse_oct_int(src: str, i: *usize, at_: usize) res[Value, TomlError] {
+    var x:   u64  = 0;
+    var any: bool = false;
+    for {
+        val b: u8 = src[@i];
+        if (b == '_') {
+            if (!any || src[@i + 1] < '0' || src[@i + 1] > '7') { ret value_fail(TomlError.syntax{@i}); }
+            @i = @i + 1;
+            cnt;
+        }
+        if (b < '0' || b > '7') { brk; }
+        any = true;
+        if (x > 0x1FFFFFFFFFFFFFFF) { ret value_fail(TomlError.overflow{at_}); }
+        x  = (x << 3) | (b - '0')::u64;
+        @i = @i + 1;
+    }
+    if (!any)                   { ret value_fail(TomlError.syntax{@i}); }
+    if (x > 0x7FFFFFFFFFFFFFFF) { ret value_fail(TomlError.overflow{at_}); }
+    ret value_ok(value_int(x::i64));
+}
+
+# parse binary digits into an integer value
+fun parse_bin_int(src: str, i: *usize, at_: usize) res[Value, TomlError] {
+    var x:   u64  = 0;
+    var any: bool = false;
+    for {
+        val b: u8 = src[@i];
+        if (b == '_') {
+            if (!any || src[@i + 1] != '0' && src[@i + 1] != '1') { ret value_fail(TomlError.syntax{@i}); }
+            @i = @i + 1;
+            cnt;
+        }
+        if (b != '0' && b != '1') { brk; }
+        any = true;
+        if (x > 0x7FFFFFFFFFFFFFFF) { ret value_fail(TomlError.overflow{at_}); }
+        x  = (x << 1) | (b - '0')::u64;
+        @i = @i + 1;
+    }
+    if (!any)                   { ret value_fail(TomlError.syntax{@i}); }
+    if (x > 0x7FFFFFFFFFFFFFFF) { ret value_fail(TomlError.overflow{at_}); }
+    ret value_ok(value_int(x::i64));
+}

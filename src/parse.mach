@@ -1,0 +1,1148 @@
+# document structure: headers, array tables and the parse entry points
+
+use std.allocator.Allocator;
+use std.allocator.Error;
+use std.allocator.allocate;
+use std.allocator.deallocate;
+use std.memory;
+use std.system.capability;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use toml.error.TomlError;
+use toml.error.at;
+use toml.expr.parse_value;
+use toml.key.define_key;
+use toml.key.parse_key_path;
+use toml.lookup.table_find;
+use toml.scan.skip_to_newline;
+use toml.scan.skip_ws;
+use toml.scan.skip_ws_comments_newlines;
+use toml.scan.text_end;
+use toml.tree.KeySegs;
+use toml.tree.array_dnit;
+use toml.tree.array_push;
+use toml.tree.dnit;
+use toml.tree.keysegs_dnit;
+use toml.tree.keysegs_init;
+use toml.tree.table_add_subtable;
+use toml.tree.table_insert;
+use toml.tree.value_dnit;
+use toml.value.Array;
+use toml.value.ORIGIN_DEFINED;
+use toml.value.ORIGIN_IMPLICIT;
+use toml.value.ORIGIN_LITERAL;
+use toml.value.TYPE_ARRAY;
+use toml.value.TYPE_TABLE;
+use toml.value.Table;
+use toml.value.Value;
+use toml.value.array_init;
+use toml.value.span_from;
+use toml.value.table_init;
+use toml.value.value_array;
+use toml.value.value_table;
+
+$if (capability.HOSTED) {
+    use std.allocator.page;
+    use std.allocator.testing;
+    use std.chrono.date.Date;
+    use std.chrono.date.Datetime;
+    use std.chrono.date.LocalDatetime;
+    use std.chrono.date.TimeOfDay;
+    use std.types.bool.bool;
+    use std.types.bool.false;
+    use std.types.bool.true;
+    use std.types.option.opt;
+    use std.types.string.str_equals;
+    use std.types.string.str_len;
+    use toml.expr.MAX_VALUE_DEPTH;
+    use toml.lookup.array_get;
+    use toml.lookup.array_len;
+    use toml.lookup.find_by_seg;
+    use toml.lookup.get;
+    use toml.lookup.get_array;
+    use toml.lookup.get_float;
+    use toml.lookup.get_int;
+    use toml.lookup.get_local_date;
+    use toml.lookup.get_local_datetime;
+    use toml.lookup.get_local_time;
+    use toml.lookup.get_offset_datetime;
+    use toml.lookup.get_str;
+    use toml.lookup.get_table;
+    use toml.lookup.table_key;
+    use toml.lookup.table_len;
+    use toml.lookup.table_value;
+    use toml.value.Span;
+    use toml.value.TYPE_INTEGER;
+    use toml.value.TYPE_LOCAL_DATETIME;
+    use toml.value.TYPE_STRING;
+}
+
+# walk a header's inner segment, creating the table when it is missing
+#
+# a header passes through any table but a literal, and through an array of
+# tables into its last element
+# ---
+# a:      allocator
+# parent: the table holding the segment
+# ks:     the header's key segments
+# si:     which segment
+# ret:    the table the segment names, or the failure (a conflict unpositioned)
+fun header_enter(a: *Allocator, parent: *Table, ks: *KeySegs, si: usize) res[*Table, TomlError] {
+    val existing: *Value = table_find(parent, ks.segs[si]);
+    if (existing == nil) {
+        val res_table_add_subtable: res[*Value, TomlError] = table_add_subtable(a, parent, ks.segs[si], ks.spans[si], ORIGIN_IMPLICIT);
+        if (sel res_table_add_subtable.err) { ret res[*Table, TomlError].err{res_table_add_subtable.err}; }
+        ret res[*Table, TomlError].ok{?res_table_add_subtable.ok.data.table};
+    }
+    if (existing.origin == ORIGIN_LITERAL) { ret res[*Table, TomlError].err{TomlError.conflict{0}}; }
+    if (existing.tag == TYPE_TABLE)        { ret res[*Table, TomlError].ok{?existing.data.table}; }
+    if (existing.tag == TYPE_ARRAY && existing.data.array.len > 0) {
+        # navigate into last element of array (per TOML spec)
+        val items: *Value = existing.data.array.items::*Value;
+        val last:  *Value = ?items[existing.data.array.len - 1];
+        if (last.tag != TYPE_TABLE) { ret res[*Table, TomlError].err{TomlError.conflict{0}}; }
+        ret res[*Table, TomlError].ok{?last.data.table};
+    }
+    ret res[*Table, TomlError].err{TomlError.conflict{0}};
+}
+
+# resolve a [table] header
+#
+# the inner segments are walked; the last names a table no header or dotted
+# key has defined, or a new one
+# ---
+# a:    allocator
+# root: document root table
+# ks:   key segments from the [...] header
+# ret:  the table's value, its span still the caller's to stamp, or the
+#       failure (a conflict unpositioned)
+fun navigate_for_table(a: *Allocator, root: *Table, ks: *KeySegs) res[*Value, TomlError] {
+    var parent: *Table = root;
+    var si:     usize  = 0;
+    for (si < ks.len - 1) {
+        val res_header_enter: res[*Table, TomlError] = header_enter(a, parent, ks, si);
+        if (sel res_header_enter.err) { ret res[*Value, TomlError].err{res_header_enter.err}; }
+        parent = res_header_enter.ok;
+        si     = si + 1;
+    }
+
+    val existing: *Value = table_find(parent, ks.segs[si]);
+    if (existing == nil)                                                  { ret table_add_subtable(a, parent, ks.segs[si], ks.spans[si], ORIGIN_DEFINED); }
+    if (existing.tag != TYPE_TABLE || existing.origin != ORIGIN_IMPLICIT) { ret res[*Value, TomlError].err{TomlError.conflict{0}}; }
+    existing.origin = ORIGIN_DEFINED;
+    ret res[*Value, TomlError].ok{existing};
+}
+
+# resolve a [[key]] header
+#
+# the inner segments are walked as a [table] header walks them, then a new table
+# is appended to the array of tables at the final segment, which an earlier
+# [[key]] header made or this one makes
+# ---
+# a:    allocator
+# root: document root table
+# ks:   key segments from the [[...]] header
+# ret:  the newly appended table's value, its span still the caller's to
+#       stamp, or the failure (a conflict unpositioned)
+fun navigate_for_array_table(a: *Allocator, root: *Table, ks: *KeySegs) res[*Value, TomlError] {
+    var parent: *Table = root;
+    var si:     usize  = 0;
+    for (si < ks.len - 1) {
+        val res_header_enter: res[*Table, TomlError] = header_enter(a, parent, ks, si);
+        if (sel res_header_enter.err) { ret res[*Value, TomlError].err{res_header_enter.err}; }
+        parent = res_header_enter.ok;
+        si     = si + 1;
+    }
+
+    # append new table to the array at the final segment
+    val final_key: str    = ks.segs[ks.len - 1];
+    val existing:  *Value = table_find(parent, final_key);
+    var new_val:   Value  = value_table(table_init());
+    new_val.origin = ORIGIN_DEFINED;
+
+    if (existing != nil) {
+        # a literal array is never appended to, even an empty one
+        if (existing.tag != TYPE_ARRAY || existing.origin != ORIGIN_DEFINED) {
+            ret res[*Value, TomlError].err{TomlError.conflict{0}};
+        }
+        val err_array_push: err[Error] = array_push(a, ?existing.data.array, new_val);
+        if (sel err_array_push.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_array_push.err}}; }
+
+        val items: *Value = existing.data.array.items::*Value;
+        ret res[*Value, TomlError].ok{?items[existing.data.array.len - 1]};
+    }
+
+    # first occurrence: create the array with one empty table
+    var arr:            Array      = array_init();
+    val err_array_push: err[Error] = array_push(a, ?arr, new_val);
+    if (sel err_array_push.err) { ret res[*Value, TomlError].err{TomlError.alloc{err_array_push.err}}; }
+
+    # the array itself is positioned at the header that first named it
+    var arr_val: Value = value_array(arr);
+    arr_val.origin = ORIGIN_DEFINED;
+    arr_val.span   = ks.spans[ks.len - 1];
+    arr_val.key    = ks.spans[ks.len - 1];
+    val err_table_insert: err[Error] = table_insert(a, parent, final_key, arr_val);
+    if (sel err_table_insert.err) {
+        array_dnit(a, ?arr);
+        ret res[*Value, TomlError].err{TomlError.alloc{err_table_insert.err}};
+    }
+
+    val added: *Value = table_find(parent, final_key);
+    val items: *Value = added.data.array.items::*Value;
+    ret res[*Value, TomlError].ok{?items[0]};
+}
+
+# parse a TOML document into a table tree
+#
+# supports TOML 1.0: basic and literal strings (single and multi-line),
+# integers (decimal, hex, octal, binary), floats, booleans, arrays,
+# tables, inline tables, array of tables, and dotted keys. the text must be
+# UTF-8, and is refused at the first byte that is not.
+# ---
+# a:   allocator for all internal allocations
+# src: null-terminated TOML source string
+# ret: the root table, or the failure; a failed parse strands nothing
+pub fun parse(a: *Allocator, src: str) res[Table, TomlError] {
+    val res_text_end: res[usize, TomlError] = text_end(src, 0xffffffffffffffff::usize);
+    if (sel res_text_end.err) { ret res[Table, TomlError].err{res_text_end.err}; }
+    ret parse_text(a, src);
+}
+
+# parse a TOML document held as `n` bytes that need not end in a NUL
+#
+# a raw NUL byte anywhere in the document is refused at its offset, since no
+# parsed string could carry it; the bytes are otherwise parsed as `parse` does
+# ---
+# a:   allocator for all internal allocations
+# src: the document's bytes
+# n:   how many
+# ret: the root table, or the failure; a failed parse strands nothing
+pub fun parse_bytes(a: *Allocator, src: *u8, n: usize) res[Table, TomlError] {
+    val res_text_end: res[usize, TomlError] = text_end(src, n);
+    if (sel res_text_end.err)           { ret res[Table, TomlError].err{res_text_end.err}; }
+    if (res_text_end.ok != n)           { ret res[Table, TomlError].err{TomlError.nul{res_text_end.ok}}; }
+    if (n == 0xffffffffffffffff::usize) { ret res[Table, TomlError].err{TomlError.alloc{Error.overflow{}}}; }
+    val res_allocate: res[*u8, Error] = allocate[u8](a, n + 1);
+    if (sel res_allocate.err) { ret res[Table, TomlError].err{TomlError.alloc{res_allocate.err}}; }
+    val text: *u8 = res_allocate.ok;
+    memory.raw_copy(text::ptr, src::ptr, n);
+    text[n] = 0;
+    val res_parsed: res[Table, TomlError] = parse_text(a, text::str);
+    deallocate[u8](a, text, n + 1);
+    ret res_parsed;
+}
+
+# parse text already checked to be UTF-8 up to its NUL
+fun parse_text(a: *Allocator, src: str) res[Table, TomlError] {
+    # the two owned values the walk builds are held HERE, so every failure inside
+    # it releases them on the way out. the walk itself only reports the failure -
+    # it never has to unwind, and a new error return cannot forget to (#3001)
+    var root:           Table          = table_init();
+    var ks:             KeySegs        = keysegs_init();
+    val err_parse_walk: err[TomlError] = parse_walk(a, src, ?root, ?ks);
+    keysegs_dnit(a, ?ks);
+    if (sel err_parse_walk.err) {
+        dnit(a, ?root);
+        ret res[Table, TomlError].err{err_parse_walk.err};
+    }
+    ret res[Table, TomlError].ok{root};
+}
+
+# the document walk: table headers, arrays of tables, and key/value lines
+#
+# `root` and `ks` are borrowed from `parse`, which owns and releases them however
+# this returns. `ks` is reused across every key path rather than being created
+# per line, and each reuse releases the previous path first.
+# ---
+# a:    allocator for parsed storage
+# src:  document text
+# root: the table being built
+# ks:   scratch key-path segments, owned by the caller
+# ret:  ok when the document was consumed, or the parse failure
+fun parse_walk(a: *Allocator, src: str, root: *Table, ks: *KeySegs) err[TomlError] {
+    var current: *Table = root;
+    var i:       usize  = 0;
+
+    for {
+        skip_ws_comments_newlines(src, ?i);
+        if (src[i] == 0) { brk; }
+
+        # array of tables: [[key]]
+        if (src[i] == '[' && src[i + 1] == '[') {
+            val header_at: usize = i;
+            i = i + 2;
+            skip_ws(src, ?i);
+
+            keysegs_dnit(a, ks);
+            val key_at:  usize          = i;
+            val err_ksr: err[TomlError] = parse_key_path(a, src, ?i, ks);
+            if (sel err_ksr.err) { ret err_ksr; }
+
+            skip_ws(src, ?i);
+            if (src[i] != ']' || src[i + 1] != ']') {
+                ret err[TomlError].err{TomlError.syntax{i}};
+            }
+            i = i + 2;
+
+            val res_navigate_for_array_table: res[*Value, TomlError] = navigate_for_array_table(a, root, ks);
+            if (sel res_navigate_for_array_table.err) { ret err[TomlError].err{at(res_navigate_for_array_table.err, key_at)}; }
+            res_navigate_for_array_table.ok.span = span_from(header_at, i);
+            res_navigate_for_array_table.ok.key  = ks.spans[ks.len - 1];
+            current                              = ?res_navigate_for_array_table.ok.data.table;
+
+            if (!skip_to_newline(src, ?i)) { ret err[TomlError].err{TomlError.syntax{i}}; }
+            cnt;
+        }
+
+        # table header: [key]
+        if (src[i] == '[') {
+            val header_at: usize = i;
+            i = i + 1;
+            skip_ws(src, ?i);
+
+            keysegs_dnit(a, ks);
+            val key_at:  usize          = i;
+            val err_ksr: err[TomlError] = parse_key_path(a, src, ?i, ks);
+            if (sel err_ksr.err) { ret err_ksr; }
+
+            skip_ws(src, ?i);
+            if (src[i] != ']') {
+                ret err[TomlError].err{TomlError.syntax{i}};
+            }
+            i = i + 1;
+
+            # inner segments record the token that created them; the table the
+            # header defines records the header, whether the header created it
+            # or a deeper header reached it first
+            val res_navigate_for_table: res[*Value, TomlError] = navigate_for_table(a, root, ks);
+            if (sel res_navigate_for_table.err) { ret err[TomlError].err{at(res_navigate_for_table.err, key_at)}; }
+            res_navigate_for_table.ok.span = span_from(header_at, i);
+            res_navigate_for_table.ok.key  = ks.spans[ks.len - 1];
+            current                        = ?res_navigate_for_table.ok.data.table;
+
+            if (!skip_to_newline(src, ?i)) { ret err[TomlError].err{TomlError.syntax{i}}; }
+            cnt;
+        }
+
+        # key = value
+        keysegs_dnit(a, ks);
+        val key_at:  usize          = i;
+        val err_ksr: err[TomlError] = parse_key_path(a, src, ?i, ks);
+        if (sel err_ksr.err) { ret err_ksr; }
+
+        skip_ws(src, ?i);
+        if (src[i] != '=') {
+            ret err[TomlError].err{TomlError.syntax{i}};
+        }
+        i = i + 1;
+
+        val res_parse_value: res[Value, TomlError] = parse_value(a, src, ?i, 0);
+        if (sel res_parse_value.err) { ret err[TomlError].err{res_parse_value.err}; }
+
+        var parsed: Value = res_parse_value.ok;
+        parsed.key = ks.spans[ks.len - 1];
+
+        val err_define_key: err[TomlError] = define_key(a, current, ks, parsed);
+        if (sel err_define_key.err) {
+            value_dnit(a, ?parsed);
+            ret err[TomlError].err{at(err_define_key.err, key_at)};
+        }
+
+        # a pair ends its line
+        if (!skip_to_newline(src, ?i)) { ret err[TomlError].err{TomlError.syntax{i}}; }
+    }
+
+    ret err[TomlError].ok{};
+}
+
+$if (capability.HOSTED) {
+    # whether document `doc` sets x to a float within tol of want
+    #[testing]
+    fun float_is(a: *Allocator, doc: str, want: f64, tol: f64) bool {
+        val res_parse: res[Table, TomlError] = parse(a, doc);
+        if (sel res_parse.err) { ret false; }
+        var t:         Table    = res_parse.ok;
+        val opt_float: opt[f64] = get_float(?t, "x");
+        dnit(a, ?t);
+        if (!sel opt_float.some) { ret false; }
+        val v: f64 = opt_float.some;
+        ret v > want - tol && v < want + tol;
+    }
+
+    # a plain fraction, and exponents that scale up, past one pow10 chunk, and down
+    test toml__floats {
+        var a: Allocator;
+        page.make(?a);
+        if (!float_is(?a, "x = 3.14", 3.14, 0.01))             { ret 1; }
+        if (!float_is(?a, "x = 1.5e3", 1500.0, 1.0))           { ret 2; }
+        if (!float_is(?a, "x = 2e10", 20000000000.0, 10000.0)) { ret 3; }
+        if (!float_is(?a, "x = 1.5e-2", 0.015, 0.0001))        { ret 4; }
+        ret 0;
+    }
+
+    # whether table `t` holds the integer `want` at `key`
+    #[testing]
+    fun int_at(t: *Table, key: str, want: i64) bool {
+        val opt_int: opt[i64] = get_int(t, key);
+        ret sel opt_int.some && opt_int.some == want;
+    }
+
+    # whether table `t` holds a float with the bit pattern `want` at `key`
+    #[testing]
+    fun float_bits_at(t: *Table, key: str, want: u64) bool {
+        val opt_float: opt[f64] = get_float(t, key);
+        ret sel opt_float.some && (opt_float.some:~u64) == want;
+    }
+
+    # whether document `doc` is refused with an overflow at offset `at_`
+    #[testing]
+    fun overflow_at(a: *Allocator, doc: str, at_: usize) bool {
+        val res_parse: res[Table, TomlError] = parse(a, doc);
+        if (sel res_parse.ok) {
+            var t: Table = res_parse.ok;
+            dnit(a, ?t);
+            ret false;
+        }
+        ret sel res_parse.err.overflow && res_parse.err.overflow == at_;
+    }
+
+    # whether document `doc` is refused with a syntax error at offset `at_`
+    #[testing]
+    fun syntax_at(a: *Allocator, doc: str, at_: usize) bool {
+        val res_parse: res[Table, TomlError] = parse(a, doc);
+        if (sel res_parse.ok) {
+            var t: Table = res_parse.ok;
+            dnit(a, ?t);
+            ret false;
+        }
+        ret sel res_parse.err.syntax && res_parse.err.syntax == at_;
+    }
+
+    # hex, octal and binary integers with underscores, a signed decimal, inf and
+    # nan with each sign, and the i64 extremes; each prefixed base refuses one
+    # digit past 64 bits and a prefix with no digits, and the TOML 1.0 integer
+    # rules refuse a value past the i64 range, a sign or upper case on a base
+    # prefix, an underscore not between digits and a leading zero
+    test toml__integer_bases_and_special_floats {
+        var a: Allocator;
+        page.make(?a);
+        val res_parse: res[Table, TomlError] = parse(?a, "h = 0xDEAD_beef\no = 0o7_55\nb = 0b1_101\nd = -1_000\np = +17\ni = inf\nn = -inf\nq = nan\nm = -nan\nmax = 9223372036854775807\nmin = -9223372036854775808\nhmax = 0x7FFF_FFFF_FFFF_FFFF\nbig = 100000000000000000000.0\nfmax = 1.7976931348623157e308\nup = 1.00000000000000011102230246251565404236316680908203126\nsub = 2.4703282292062328e-324\n");
+        if (sel res_parse.err) { ret 1; }
+        var t: Table = res_parse.ok;
+        fin { dnit(?a, ?t); }
+
+        if (!int_at(?t, "h", 3735928559))                   { ret 2; }
+        if (!int_at(?t, "o", 493))                          { ret 3; }
+        if (!int_at(?t, "b", 13))                           { ret 4; }
+        if (!int_at(?t, "d", -1000))                        { ret 5; }
+        if (!int_at(?t, "p", 17))                           { ret 6; }
+        if (!float_bits_at(?t, "i", 0x7FF0000000000000))    { ret 7; }
+        if (!float_bits_at(?t, "n", 0xFFF0000000000000))    { ret 8; }
+        if (!float_bits_at(?t, "q", 0x7FF8000000000000))    { ret 9; }
+        if (!float_bits_at(?t, "m", 0xFFF8000000000000))    { ret 10; }
+        if (!int_at(?t, "max", 9223372036854775807))        { ret 17; }
+        if (!int_at(?t, "min", 0x8000000000000000u64:~i64)) { ret 18; }
+        if (!int_at(?t, "hmax", 9223372036854775807))       { ret 19; }
+        if (!float_bits_at(?t, "big", 0x4415AF1D78B58C40))  { ret 35; }
+        if (!float_bits_at(?t, "fmax", 0x7FEFFFFFFFFFFFFF)) { ret 37; }
+        if (!float_bits_at(?t, "up", 0x3FF0000000000001))   { ret 38; }
+        if (!float_bits_at(?t, "sub", 0x0000000000000001))  { ret 39; }
+
+        if (!overflow_at(?a, "x = 0x1_0000_0000_0000_0000\n", 4))         { ret 11; }
+        if (!overflow_at(?a, "x = 0o2_000_000_000_000_000_000_000\n", 4)) { ret 12; }
+
+        if (!overflow_at(?a, "x = 0b10000000000000000000000000000000000000000000000000000000000000000\n", 4)) { ret 13; }
+
+        if (!syntax_at(?a, "x = 0x\n", 6)) { ret 14; }
+        if (!syntax_at(?a, "x = 0o\n", 6)) { ret 15; }
+        if (!syntax_at(?a, "x = 0b\n", 6)) { ret 16; }
+
+        if (!overflow_at(?a, "x = 9223372036854775808\n", 4))      { ret 20; }
+        if (!overflow_at(?a, "x = -9223372036854775809\n", 4))     { ret 21; }
+        if (!overflow_at(?a, "x = 0x8000000000000000\n", 4))       { ret 22; }
+        if (!overflow_at(?a, "x = 0o1000000000000000000000\n", 4)) { ret 23; }
+        if (!overflow_at(?a, "x = 100000000000000000000\n", 4))    { ret 36; }
+
+        if (!syntax_at(?a, "x = -0x10\n", 4))  { ret 24; }
+        if (!syntax_at(?a, "x = 0X10\n", 5))   { ret 25; }
+        if (!syntax_at(?a, "x = 1__0\n", 5))   { ret 26; }
+        if (!syntax_at(?a, "x = 1_\n", 5))     { ret 27; }
+        if (!syntax_at(?a, "x = 0x_1\n", 6))   { ret 28; }
+        if (!syntax_at(?a, "x = 0o7_\n", 7))   { ret 29; }
+        if (!syntax_at(?a, "x = 0b1__0\n", 7)) { ret 30; }
+        if (!syntax_at(?a, "x = 007\n", 4))    { ret 31; }
+        if (!syntax_at(?a, "x = 01.5\n", 4))   { ret 32; }
+        if (!syntax_at(?a, "x = 1.5_\n", 7))   { ret 33; }
+        if (!syntax_at(?a, "x = 1e_5\n", 6))   { ret 34; }
+        ret 0;
+    }
+
+    # the specification's examples of each of the four kinds (TOML 1.0, "Offset
+    # Date-Time" to "Local Time") read as the standard library's types, in a
+    # table, an array and an inline table, and a date that a comment follows
+    test toml__dates_and_times {
+        var a: Allocator;
+        page.make(?a);
+        val res_parse: res[Table, TomlError] = parse(?a, "odt1 = 1979-05-27T07:32:00Z\nodt2 = 1979-05-27T00:32:00-07:00\nodt3 = 1979-05-27T00:32:00.999999-07:00\nodt4 = 1979-05-27 07:32:00Z\nldt1 = 1979-05-27T07:32:00\nldt2 = 1979-05-27T00:32:00.999999\nld1 = 1979-05-27 # a date\nlt1 = 07:32:00\nlt2 = 00:32:00.999999\nmixed = [1979-05-27, 07:32:00, 1979-05-27 07:32:00]\nin = { at = 2016-12-31T23:59:60Z }\n");
+        if (sel res_parse.err) { ret 1; }
+        var t: Table = res_parse.ok;
+        fin { dnit(?a, ?t); }
+
+        val opt_odt1: opt[Datetime] = get_offset_datetime(?t, "odt1");
+        if (sel opt_odt1.none) { ret 2; }
+        val odt1: Datetime = opt_odt1.some;
+        if (odt1.year != 1979 || odt1.month != 5 || odt1.day != 27 || odt1.hour != 7 || odt1.minute != 32 || odt1.second != 0 || odt1.offset != 0) { ret 2; }
+        val opt_odt3: opt[Datetime] = get_offset_datetime(?t, "odt3");
+        if (sel opt_odt3.none)                                                    { ret 3; }
+        if (opt_odt3.some.nsec != 999999000 || opt_odt3.some.offset != 0 - 25200) { ret 3; }
+        val opt_odt4: opt[Datetime] = get_offset_datetime(?t, "odt4");
+        if (sel opt_odt4.none)       { ret 4; }
+        if (opt_odt4.some.hour != 7) { ret 4; }
+        val opt_ldt2: opt[LocalDatetime] = get_local_datetime(?t, "ldt2");
+        if (sel opt_ldt2.none)               { ret 5; }
+        if (opt_ldt2.some.nsec != 999999000) { ret 5; }
+        val opt_ld1: opt[Date] = get_local_date(?t, "ld1");
+        if (sel opt_ld1.none)       { ret 6; }
+        if (opt_ld1.some.day != 27) { ret 6; }
+        val opt_lt2: opt[TimeOfDay] = get_local_time(?t, "lt2");
+        if (sel opt_lt2.none)                                            { ret 7; }
+        if (opt_lt2.some.minute != 32 || opt_lt2.some.nsec != 999999000) { ret 7; }
+        val opt_as_date: opt[Date] = get_local_date(?t, "odt1");
+        if (sel opt_as_date.some) { ret 8; }
+
+        val opt_mixed: opt[*Array] = get_array(?t, "mixed");
+        if (sel opt_mixed.none)             { ret 9; }
+        if (array_len(opt_mixed.some) != 3) { ret 9; }
+        val opt_third: opt[*Value] = array_get(opt_mixed.some, 2);
+        if (sel opt_third.none)                        { ret 10; }
+        if (opt_third.some.tag != TYPE_LOCAL_DATETIME) { ret 10; }
+        val opt_leap: opt[Datetime] = get_offset_datetime(?t, "in.at");
+        if (sel opt_leap.none)          { ret 11; }
+        if (opt_leap.some.second != 60) { ret 11; }
+        ret 0;
+    }
+
+    # every branch of the grammar, refused at the byte that breaks it or the
+    # field out of range, in the toml-test suite's categories: each field one
+    # past its range or at zero, the 29th and 30th of February, a leap second
+    # away from a UTC month's end, an offset hour or minute past its range, a
+    # missing leading zero, missing seconds, a missing separator, a trailing T,
+    # a fifth year digit, a fraction dot with no digit, and a local time with
+    # an offset
+    test toml__date_and_time_refusals {
+        var a: Allocator;
+        page.make(?a);
+        if (!syntax_at(?a, "x = 2006-13-01\n", 9))                 { ret 1; }
+        if (!syntax_at(?a, "x = 2007-00-01\n", 9))                 { ret 2; }
+        if (!syntax_at(?a, "x = 2006-01-32\n", 12))                { ret 3; }
+        if (!syntax_at(?a, "x = 2006-01-00\n", 12))                { ret 4; }
+        if (!syntax_at(?a, "x = 2023-02-29\n", 12))                { ret 5; }
+        if (!syntax_at(?a, "x = 1988-02-30\n", 12))                { ret 6; }
+        if (!syntax_at(?a, "x = 2006-01-01T24:00:00Z\n", 15))      { ret 7; }
+        if (!syntax_at(?a, "x = 2006-01-01T00:60:00Z\n", 18))      { ret 8; }
+        if (!syntax_at(?a, "x = 2006-01-01T00:00:61Z\n", 21))      { ret 9; }
+        if (!syntax_at(?a, "x = 2006-01-01T00:00:60Z\n", 21))      { ret 10; }
+        if (!syntax_at(?a, "x = 2006-01-01T00:00:00+24:00\n", 24)) { ret 11; }
+        if (!syntax_at(?a, "x = 2006-01-01T00:00:00+00:60\n", 27)) { ret 12; }
+        if (!syntax_at(?a, "x = 1987-7-05T17:45:00Z\n", 10))       { ret 13; }
+        if (!syntax_at(?a, "x = 1987-07-05T17:45Z\n", 20))         { ret 14; }
+        if (!syntax_at(?a, "x = 1987-07-0517:45:00Z\n", 14))       { ret 15; }
+        if (!syntax_at(?a, "x = 1987-07-05T\n", 15))               { ret 16; }
+        if (!syntax_at(?a, "x = 10000-01-01\n", 9))                { ret 17; }
+        if (!syntax_at(?a, "x = 1987-07-05T17:45:00.Z\n", 24))     { ret 18; }
+        if (!syntax_at(?a, "x = 24:00:00\n", 4))                   { ret 19; }
+        if (!syntax_at(?a, "x = 07:32:00Z\n", 12))                 { ret 20; }
+        if (!syntax_at(?a, "x = 7:32:00\n", 5))                    { ret 21; }
+        ret 0;
+    }
+
+    # \u and \U escapes encode to one, two, three and four utf-8 bytes, and a bad
+    # hex digit, a surrogate or a code past U+10FFFF is refused at the escape
+    # letter; a multi-line basic string drops its first newline and a line-ending
+    # backslash with the whitespace and newlines after it, stopping at a lone CR,
+    # which is text and not a newline; a multi-line literal string drops its
+    # first newline and keeps a backslash as text, and either keeps up to two
+    # quotes before its closing three. a backslash with text after it on its
+    # line, a raw control character and a multi-line quoted key are refused
+    test toml__string_escapes_and_multi_line_bodies {
+        var a: Allocator;
+        page.make(?a);
+        val res_parse: res[Table, TomlError] = parse(?a, "u = \"\\u0041\\u00e9\\u20AC\\U0001F600\"\nb = \"\"\"\nab \\  \n    cd\"\"\"\nl = '''\r\na\\b\n'''\nq = \"\"\"a\"\"\"\"\"\nr = '''a''''\nc = \"\"\"a\\\n\r b\"\"\"\n");
+        if (sel res_parse.err) { ret 1; }
+        var t: Table = res_parse.ok;
+        fin { dnit(?a, ?t); }
+
+        val opt_u: opt[str] = get_str(?t, "u");
+        if (!sel opt_u.some)                                                  { ret 2; }
+        if (!str_equals(opt_u.some, "A\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80")) { ret 3; }
+        val opt_b: opt[str] = get_str(?t, "b");
+        if (!sel opt_b.some)                  { ret 4; }
+        if (!str_equals(opt_b.some, "ab cd")) { ret 5; }
+        val opt_l: opt[str] = get_str(?t, "l");
+        if (!sel opt_l.some)                   { ret 6; }
+        if (!str_equals(opt_l.some, "a\\b\n")) { ret 7; }
+        val opt_q: opt[str] = get_str(?t, "q");
+        if (!sel opt_q.some)                  { ret 10; }
+        if (!str_equals(opt_q.some, "a\"\"")) { ret 11; }
+        val opt_r: opt[str] = get_str(?t, "r");
+        if (!sel opt_r.some)               { ret 12; }
+        if (!str_equals(opt_r.some, "a'")) { ret 13; }
+        val opt_c: opt[str] = get_str(?t, "c");
+        if (!sel opt_c.some)                  { ret 22; }
+        if (!str_equals(opt_c.some, "a\r b")) { ret 23; }
+
+        if (!syntax_at(?a, "s = \"\\u12x4\"\n", 6))          { ret 8; }
+        if (!syntax_at(?a, "s = \"\\uD800\"\n", 6))          { ret 9; }
+        if (!syntax_at(?a, "s = \"\\U00110000\"\n", 6))      { ret 14; }
+        if (!syntax_at(?a, "s = \"\"\"a\"\"\"\"\"\"\n", 13)) { ret 15; }
+        if (!syntax_at(?a, "s = \"\"\"a\\ b\"\"\"\n", 9))    { ret 16; }
+        if (!syntax_at(?a, "s = \"a\x01b\"\n", 6))           { ret 17; }
+        if (!syntax_at(?a, "s = \"\"\"a\x01b\"\"\"\n", 8))   { ret 18; }
+        if (!syntax_at(?a, "s = 'a\x7fb'\n", 6))             { ret 19; }
+        if (!syntax_at(?a, "s = '''a\x1fb'''\n", 8))         { ret 20; }
+        if (!syntax_at(?a, "\"\"\"k\"\"\" = 1\n", 0))        { ret 21; }
+        ret 0;
+    }
+
+    # teardown tests (#474). `parse` allocates the whole tree from the caller's
+    # allocator and `dnit` is its pairing, so the property worth asserting is a
+    # BALANCE rather than any particular call: a parse followed by a teardown must
+    # leave the allocator exactly where it started. Measured through a counting
+    # allocator, since nothing about a leak is visible from the returned value.
+
+    # a document covering every construct that owns storage: nested tables through a
+    # dotted key, an array of tables, an inline table, arrays of each scalar type, and
+    # enough keys in one table to force the parallel arrays to grow past their initial
+    # capacity (which is where the old code stranded the buffer it replaced)
+    #[testing]
+    fun teardown_doc() str {
+        ret "title = \"demo\"\nk1 = 1\nk2 = 2\nk3 = 3\nk4 = 4\nk5 = 5\nk6 = 6\nk7 = 7\nk8 = 8\nk9 = 9\nk10 = 10\n\n[owner]\nname = \"someone\"\nnums = [1, 2, 3, 4, 5, 6, 7, 8]\nstrs = [\"a\", \"bb\", \"ccc\"]\nflag = true\nratio = 1.5\n\n[deep.nested.table]\nx = \"y\"\n\n[[items]]\nid = 1\ntag = \"first\"\n\n[[items]]\nid = 2\ntag = \"second\"\n\n[inline]\npair = { a = 1, b = \"two\", c = [3, 4] }\n";
+    }
+
+    # every lookup answers none for what is not there: a missing key, a path
+    # whose inner segment is a scalar, a value of another shape, an index past the
+    # end of an array or a table
+    test toml__lookups {
+        var a: Allocator;
+        page.make(?a);
+        val res_parse: res[Table, TomlError] = parse(?a, teardown_doc());
+        if (sel res_parse.err) { ret 1; }
+        var t: Table = res_parse.ok;
+        fin { dnit(?a, ?t); }
+
+        val opt_title: opt[str] = get_str(?t, "title");
+        if (sel opt_title.none)                  { ret 2; }
+        if (!str_equals(opt_title.some, "demo")) { ret 3; }
+        val opt_deep: opt[str] = get_str(?t, "deep.nested.table.x");
+        if (sel opt_deep.none)               { ret 4; }
+        if (!str_equals(opt_deep.some, "y")) { ret 5; }
+        val opt_missing: opt[str] = get_str(?t, "owner.missing");
+        if (sel opt_missing.some) { ret 6; }
+        val opt_through_scalar: opt[*Value] = get(?t, "title.inner");
+        if (sel opt_through_scalar.some) { ret 7; }
+        val opt_wrong_shape: opt[str] = get_str(?t, "k1");
+        if (sel opt_wrong_shape.some) { ret 8; }
+        val opt_as_int: opt[i64] = get_int(?t, "k1");
+        if (sel opt_as_int.none)  { ret 9; }
+        if (opt_as_int.some != 1) { ret 10; }
+
+        val opt_owner: opt[*Table] = get_table(?t, "owner");
+        if (sel opt_owner.none) { ret 11; }
+        val opt_not_table: opt[*Table] = get_table(?t, "title");
+        if (sel opt_not_table.some) { ret 12; }
+        val opt_nums: opt[*Array] = get_array(opt_owner.some, "nums");
+        if (sel opt_nums.none)             { ret 13; }
+        if (array_len(opt_nums.some) != 8) { ret 14; }
+        val opt_last: opt[*Value] = array_get(opt_nums.some, 7);
+        if (sel opt_last.none)                                                    { ret 15; }
+        if (opt_last.some.tag != TYPE_INTEGER || opt_last.some.data.integer != 8) { ret 16; }
+        val opt_past: opt[*Value] = array_get(opt_nums.some, 8);
+        if (sel opt_past.some) { ret 17; }
+        val opt_not_array: opt[*Array] = get_array(?t, "owner");
+        if (sel opt_not_array.some) { ret 18; }
+
+        val n: usize = table_len(opt_owner.some);
+        if (n == 0) { ret 19; }
+        val opt_first_key: opt[str] = table_key(opt_owner.some, 0);
+        if (sel opt_first_key.none)                  { ret 20; }
+        if (!str_equals(opt_first_key.some, "name")) { ret 21; }
+        val opt_first_value: opt[*Value] = table_value(opt_owner.some, 0);
+        if (sel opt_first_value.none)                { ret 22; }
+        if (opt_first_value.some.tag != TYPE_STRING) { ret 23; }
+        val opt_no_key: opt[str] = table_key(opt_owner.some, n);
+        if (sel opt_no_key.some) { ret 24; }
+        val opt_no_value: opt[*Value] = table_value(opt_owner.some, n);
+        if (sel opt_no_value.some) { ret 25; }
+        ret 0;
+    }
+
+    test toml__parse_then_dnit_returns_every_byte {
+        var c: testing.Counting;
+        var a: Allocator;
+        testing.counting_make(?c, ?a);
+
+        val res_parse: res[Table, TomlError] = parse(?a, teardown_doc());
+        if (sel res_parse.err) { ret 2; }
+        var t: Table = res_parse.ok;
+        if (c.live == 0) { ret 3; } # the parse must actually have allocated
+
+        dnit(?a, ?t);
+        if (c.live != 0)                                    { ret 4; }
+        if (t.len != 0 || t.keys != nil || t.values != nil) { ret 5; }
+
+        # a second teardown is a no-op, not a double free
+        dnit(?a, ?t);
+        if (c.live != 0) { ret 6; }
+        ret 0;
+    }
+
+    # whether document `doc` is refused with a conflict at offset `at_`
+    #[testing]
+    fun conflict_at(a: *Allocator, doc: str, at_: usize) bool {
+        val res_parse: res[Table, TomlError] = parse(a, doc);
+        if (sel res_parse.ok) {
+            var t: Table = res_parse.ok;
+            dnit(a, ?t);
+            ret false;
+        }
+        if (!sel res_parse.err.conflict) { ret false; }
+        ret res_parse.err.conflict == at_;
+    }
+
+    # TOML 1.0 defines a key or table once: each redefinition is refused at its
+    # key and releases the value it parsed, while a header may still pass through
+    # what an ended section's dotted keys made and into an array of tables.
+    # whitespace around the dots of a key does not make it another key
+    test toml__redefinition_is_refused {
+        var c: testing.Counting;
+        var a: Allocator;
+        testing.counting_make(?c, ?a);
+
+        if (!conflict_at(?a, "dup = \"first value here\"\ndup = [\"a\", \"b\"]\n", 25)) { ret 1; }
+        if (!conflict_at(?a, "x = { k = \"v\", k = \"w\" }\n", 15))                     { ret 2; }
+        if (!conflict_at(?a, "[a]\n[a]\n", 5))                                          { ret 3; }
+        if (!conflict_at(?a, "a.b = \"x\"\na.b = \"y\"\n", 10))                         { ret 4; }
+        if (!conflict_at(?a, "a.b = 1\n[a]\n", 9))                                      { ret 5; }
+        if (!conflict_at(?a, "[a.b]\n[a]\nb.c = 1\n", 10))                              { ret 6; }
+        if (!conflict_at(?a, "a = { x = 1 }\n[a]\n", 15))                               { ret 7; }
+        if (!conflict_at(?a, "a = { x = 1 }\na.y = \"z\"\n", 14))                       { ret 8; }
+        if (!conflict_at(?a, "a = []\n[[a]]\n", 9))                                     { ret 9; }
+        if (!conflict_at(?a, "[[a]]\n[a]\n", 7))                                        { ret 10; }
+        if (!conflict_at(?a, "a = { x = 1 }\n[a.b]\n", 15))                             { ret 11; }
+
+        # whitespace around a dot is ignored, so a spaced key names the same key
+        if (!conflict_at(?a, "a.b = 1\na . b = 2\n", 8))           { ret 15; }
+        if (!conflict_at(?a, "[a.b]\n[ a\t. b ]\n", 8))            { ret 16; }
+        if (!conflict_at(?a, "[[ a . b ]]\n[a.b]\n", 13))          { ret 17; }
+        if (!conflict_at(?a, "x = { a . b = 1, a. b = 2 }\n", 17)) { ret 18; }
+
+        val res_parse: res[Table, TomlError] = parse(?a, "[fruit]\napple.color = 1\n[fruit.apple.texture]\n[[f]]\n[f.p]\nx = 1\n[[f]]\n[f.p]\nx = 2\n");
+        if (sel res_parse.err) { ret 12; }
+        var t:      Table       = res_parse.ok;
+        var second: i64         = 0;
+        val opt_f:  opt[*Array] = get_array(?t, "f");
+        if (sel opt_f.some) {
+            val opt_element: opt[*Value] = array_get(opt_f.some, 1);
+            if (sel opt_element.some) {
+                val opt_x: opt[i64] = get_int(?opt_element.some.data.table, "p.x");
+                if (sel opt_x.some) { second = opt_x.some; }
+            }
+        }
+        dnit(?a, ?t);
+        if (second != 2) { ret 13; }
+        if (c.live != 0) { ret 14; }
+        ret 0;
+    }
+
+    # build "k = " followed by `n` open brackets, the shape that used to recurse
+    # once per bracket until the stack ran out
+    #[testing]
+    fun nested_prefix(a: *Allocator, n: usize) str {
+        val total:        usize           = 4 + n;
+        val res_allocate: res[*u8, Error] = allocate[u8](a, total + 1);
+        if (sel res_allocate.err) { ret nil; }
+        val buf: *u8 = res_allocate.ok;
+        buf[0] = 'k';
+        buf[1] = ' ';
+        buf[2] = '=';
+        buf[3] = ' ';
+        var i: usize = 0;
+        for (i < n) {
+            buf[4 + i] = '[';
+            i          = i + 1;
+        }
+        buf[total] = 0;
+        ret buf::str;
+    }
+
+    # close a "k = [[[..." prefix into a whole document, with a scalar at the bottom
+    #
+    # the scalar matters: an empty innermost array is closed without ever asking for
+    # a value, so it costs one descent less. with it, `n` brackets is exactly `n`
+    # levels deep, which is what makes the boundary below mean what it says.
+    #[testing]
+    fun nested_document(a: *Allocator, open_: str, n: usize) str {
+        val head:         usize           = str_len(open_);
+        val total:        usize           = head + 1 + n;
+        val res_allocate: res[*u8, Error] = allocate[u8](a, total + 1);
+        if (sel res_allocate.err) { ret nil; }
+        val buf: *u8   = res_allocate.ok;
+        var i:   usize = 0;
+        for (i < head) {
+            buf[i] = open_[i];
+            i      = i + 1;
+        }
+        buf[head] = '1';
+        i         = 0;
+        for (i < n) {
+            buf[head + 1 + i] = ']';
+            i                 = i + 1;
+        }
+        buf[total] = 0;
+        ret buf::str;
+    }
+
+    # the bound is where it says it is: one under is accepted, one over is refused,
+    # so the constant cannot drift from the behaviour without this failing
+    test toml__nesting_bound {
+        var c: testing.Counting;
+        var a: Allocator;
+        testing.counting_make(?c, ?a);
+
+        var bad: i32 = 0;
+
+        # MAX_VALUE_DEPTH open brackets, each closed: the deepest accepted document
+        val n_ok:    usize = MAX_VALUE_DEPTH;
+        val open_ok: str   = nested_prefix(?a, n_ok);
+        if (open_ok == nil) { ret 2; }
+        val doc_ok: str = nested_document(?a, open_ok, n_ok);
+        if (doc_ok == nil) { ret 3; }
+        val res_parse: res[Table, TomlError] = parse(?a, doc_ok);
+        if (sel res_parse.err) { bad = 4; }
+        if (sel res_parse.ok) {
+            var t: Table = res_parse.ok;
+            dnit(?a, ?t);
+        }
+        deallocate[u8](?a, open_ok, 4 + n_ok + 1);
+        deallocate[u8](?a, doc_ok, 4 + n_ok + 1 + n_ok + 1);
+
+        # one deeper is refused
+        if (bad == 0) {
+            val n_no:    usize = MAX_VALUE_DEPTH + 1;
+            val open_no: str   = nested_prefix(?a, n_no);
+            if (open_no == nil) { ret 5; }
+            val doc_no: str = nested_document(?a, open_no, n_no);
+            if (doc_no == nil) { ret 6; }
+            val res_parse: res[Table, TomlError] = parse(?a, doc_no);
+            if (!sel res_parse.err) { bad = 7; }
+            if (sel res_parse.err) {
+                if (!sel res_parse.err.depth) { bad = 8; }
+            }
+            deallocate[u8](?a, open_no, 4 + n_no + 1);
+            deallocate[u8](?a, doc_no, 4 + n_no + 1 + n_no + 1);
+        }
+
+        if (bad == 0 && c.live != 0) { bad = 9; }
+        ret bad;
+    }
+
+    # a key path that collides with a non-table value releases the value already
+    # parsed for it
+    #
+    # this is the one path in the inline-table loop that parses a value and then
+    # throws it away, and it had no coverage: the value must be a string, because
+    # an integer owns no heap and freeing it proves nothing.
+    test toml__inline_key_conflict_releases_its_value {
+        var c: testing.Counting;
+        var a: Allocator;
+        testing.counting_make(?c, ?a);
+
+        # `k` holds an integer, then `k.deeper` asks to descend through it
+        val res_parse: res[Table, TomlError] = parse(?a, "x = { k = 1, k.deeper = \"a heap allocated string\" }\n");
+        if (!sel res_parse.err) { ret 2; }
+        if (c.live != 0)        { ret 3; }
+        ret 0;
+    }
+
+    # each failure is classified and positioned: syntax at the offending byte,
+    # overflow and conflict at the literal or key they were raised for
+    test toml__failures_carry_offsets {
+        var c: testing.Counting;
+        var a: Allocator;
+        testing.counting_make(?c, ?a);
+
+        val res_parse: res[Table, TomlError] = parse(?a, "a = 1\nb 2\n");
+        if (!sel res_parse.err)        { ret 2; }
+        if (!sel res_parse.err.syntax) { ret 3; }
+        if (res_parse.err.syntax != 8) { ret 3; }
+
+        val res_big: res[Table, TomlError] = parse(?a, "x = 1\ny = 99999999999999999999\n");
+        if (!sel res_big.err)           { ret 4; }
+        if (!sel res_big.err.overflow)  { ret 5; }
+        if (res_big.err.overflow != 10) { ret 5; }
+
+        val res_clash: res[Table, TomlError] = parse(?a, "k = 1\nk.deeper = 2\n");
+        if (!sel res_clash.err)          { ret 6; }
+        if (!sel res_clash.err.conflict) { ret 7; }
+        if (res_clash.err.conflict != 6) { ret 7; }
+
+        val res_header: res[Table, TomlError] = parse(?a, "n = 1\n[[n]]\n");
+        if (!sel res_header.err)          { ret 8; }
+        if (!sel res_header.err.conflict) { ret 9; }
+        if (res_header.err.conflict != 8) { ret 9; }
+
+        val res_esc: res[Table, TomlError] = parse(?a, "s = \"ab\\qcd\"\n");
+        if (!sel res_esc.err)        { ret 10; }
+        if (!sel res_esc.err.syntax) { ret 11; }
+        if (res_esc.err.syntax != 8) { ret 11; }
+
+        val res_open: res[Table, TomlError] = parse(?a, "s = 'abc\n");
+        if (!sel res_open.err)        { ret 12; }
+        if (!sel res_open.err.syntax) { ret 13; }
+        if (res_open.err.syntax != 8) { ret 13; }
+
+        # a pair and a header each end their line, at a newline that is LF or
+        # CRLF, and array elements are separated by commas
+        if (!syntax_at(?a, "a = 1 b = 2\n", 6))  { ret 15; }
+        if (!syntax_at(?a, "a = 1\rb = 2\n", 5)) { ret 16; }
+        if (!syntax_at(?a, "[a] b = 1\n", 4))    { ret 17; }
+        if (!syntax_at(?a, "x = [1 2, 3]\n", 7)) { ret 18; }
+
+        # the text is UTF-8, refused at the first byte that breaks it: a bad
+        # lead, an overlong form, a sequence cut short; a comment holds no
+        # control character but tab
+        if (!syntax_at(?a, "x = 1 # \xFF\n", 8))         { ret 19; }
+        if (!syntax_at(?a, "s = \"\xE0\x80\xAF\"\n", 6)) { ret 20; }
+        if (!syntax_at(?a, "x = 1 # \xE2\x82", 10))      { ret 21; }
+        if (!syntax_at(?a, "x = 1 # a\x07b\n", 9))       { ret 22; }
+        if (!syntax_at(?a, "# a\rx = 1\n", 3))           { ret 23; }
+        if (!syntax_at(?a, "# a\x7F\n", 3))              { ret 24; }
+        val res_fine: res[Table, TomlError] = parse(?a, "# caf\xC3\xA9\t\xF0\x9F\x98\x80\r\nx = 1\n");
+        if (sel res_fine.err) { ret 25; }
+        var fine: Table = res_fine.ok;
+        dnit(?a, ?fine);
+
+        if (c.live != 0) { ret 14; }
+        ret 0;
+    }
+
+    # a NUL byte is refused at its offset, raw or as either escape, in a basic
+    # or a multi-line basic string; a literal string keeps a backslash as text
+    test toml__nul_is_refused_at_its_offset {
+        var c: testing.Counting;
+        var a: Allocator;
+        testing.counting_make(?c, ?a);
+
+        val res_short: res[Table, TomlError] = parse(?a, "s = \"ab\\u0000\"\n");
+        if (!sel res_short.err)     { ret 1; }
+        if (!sel res_short.err.nul) { ret 2; }
+        if (res_short.err.nul != 7) { ret 2; }
+
+        val res_long: res[Table, TomlError] = parse(?a, "x = 1\ns = \"\"\"a\\U00000000\"\"\"\n");
+        if (!sel res_long.err)      { ret 3; }
+        if (!sel res_long.err.nul)  { ret 4; }
+        if (res_long.err.nul != 14) { ret 4; }
+
+        val res_literal: res[Table, TomlError] = parse(?a, "s = 'a\\u0000'\n");
+        if (sel res_literal.err) { ret 5; }
+        var lt: Table = res_literal.ok;
+        dnit(?a, ?lt);
+
+        var raw: [8]u8;
+        raw[0] = 'x';
+        raw[1] = ' ';
+        raw[2] = '=';
+        raw[3] = ' ';
+        raw[4] = '1';
+        raw[5] = ' ';
+        raw[6] = 0;
+        raw[7] = '\n';
+        val res_bytes: res[Table, TomlError] = parse_bytes(?a, ?raw[0], 8);
+        if (!sel res_bytes.err)     { ret 6; }
+        if (!sel res_bytes.err.nul) { ret 7; }
+        if (res_bytes.err.nul != 6) { ret 7; }
+
+        val res_clean: res[Table, TomlError] = parse_bytes(?a, ?raw[0], 5);
+        if (sel res_clean.err) { ret 8; }
+        var ct:      Table    = res_clean.ok;
+        val opt_int: opt[i64] = get_int(?ct, "x");
+        if (!sel opt_int.some) { ret 9; }
+        dnit(?a, ?ct);
+
+        if (c.live != 0) { ret 10; }
+        ret 0;
+    }
+
+    # each acquisition refused in turn: the parse reports the allocator's error,
+    # nothing is stranded, and the tree released afterwards balances
+    test toml__refused_acquisition_strands_nothing {
+        var ordinal: usize = 1;
+        for (ordinal <= 512) {
+            var tracker:  testing.Testing;
+            val err_made: err[Error] = testing.init(?tracker);
+            if (sel err_made.err) { ret 1; }
+            testing.fail_at_ordinal(?tracker, ordinal);
+            val a: *Allocator = testing.allocator_of(?tracker);
+
+            val res_parse: res[Table, TomlError] = parse(a, teardown_doc());
+            var accepted:  bool                  = false;
+            if (sel res_parse.err) {
+                if (!sel res_parse.err.alloc) {
+                    testing.dnit(?tracker);
+                    ret 2;
+                }
+                if (!sel res_parse.err.alloc.exhausted) {
+                    testing.dnit(?tracker);
+                    ret 3;
+                }
+            }
+            if (sel res_parse.ok) {
+                var t: Table = res_parse.ok;
+                accepted = true;
+                val err_released: err[Error] = dnit(a, ?t);
+                if (sel err_released.err) {
+                    testing.dnit(?tracker);
+                    ret 4;
+                }
+            }
+            val leaked:   bool  = testing.live_count(?tracker) != 0 || testing.double_free_count(?tracker) != 0;
+            val attempts: usize = testing.attempt_count(?tracker);
+            testing.dnit(?tracker);
+            if (leaked) { ret 5; }
+            if (accepted) {
+                if (attempts >= ordinal) { ret 6; }
+                if (ordinal < 8)         { ret 7; }
+                ret 0;
+            }
+            if (attempts != ordinal) { ret 8; }
+            ordinal = ordinal + 1;
+        }
+        ret 9;
+    }
+
+    # source positions (#811). every span is checked against a fixed document by
+    # its byte offset and length, so a drift in what a token "as written" means
+    # (quotes, brackets, the header line) is a number and not an opinion
+    #[testing]
+    fun span_is(sp: Span, at_: usize, len: usize) bool {
+        ret sp.at == at_ && sp.len == len;
+    }
+
+    test toml__source_spans {
+        var c: testing.Counting;
+        var a: Allocator;
+        testing.counting_make(?c, ?a);
+
+        val doc:       str                   = "# manifest\n[project]\nname = \"std\"\nmach = \"^5.8\"\ndeps.core.version = 2\ntargets = [ \"linux\", 'win' ]\n[project.\"quoted key\"]\nx = { y = true }\n[[artifact]]\nkind = \"lib\"\n[[artifact]]\nkind = \"bin\"\n";
+        val res_parse: res[Table, TomlError] = parse(?a, doc);
+        if (sel res_parse.err) { ret 2; }
+        var t: Table = res_parse.ok;
+
+        # a header-defined table: the header line is its span, the last segment its key
+        val opt_project: opt[*Value] = get(?t, "project");
+        if (!sel opt_project.some)                  { ret 3; }
+        if (!span_is(opt_project.some.span, 11, 9)) { ret 4; }
+        if (!span_is(opt_project.some.key, 12, 7))  { ret 5; }
+
+        # a nested key and its string literal, quotes included
+        val opt_name: opt[*Value] = get(?t, "project.name");
+        if (!sel opt_name.some)                  { ret 6; }
+        if (!span_is(opt_name.some.key, 21, 4))  { ret 7; }
+        if (!span_is(opt_name.some.span, 28, 5)) { ret 8; }
+        val opt_mach: opt[*Value] = get(?t, "project.mach");
+        if (!sel opt_mach.some)                  { ret 9; }
+        if (!span_is(opt_mach.some.span, 41, 6)) { ret 10; }
+
+        # a dotted key: the implicit tables record the segment that created them,
+        # the leaf its last segment and its literal
+        val opt_deps: opt[*Value] = get(?t, "project.deps");
+        if (!sel opt_deps.some)                  { ret 11; }
+        if (!span_is(opt_deps.some.span, 48, 4)) { ret 12; }
+        if (!span_is(opt_deps.some.key, 48, 4))  { ret 13; }
+        val opt_core: opt[*Value] = get(?t, "project.deps.core");
+        if (!sel opt_core.some)                 { ret 14; }
+        if (!span_is(opt_core.some.key, 53, 4)) { ret 15; }
+        val opt_version: opt[*Value] = get(?t, "project.deps.core.version");
+        if (!sel opt_version.some)                  { ret 16; }
+        if (!span_is(opt_version.some.key, 58, 7))  { ret 17; }
+        if (!span_is(opt_version.some.span, 68, 1)) { ret 18; }
+
+        # an array literal and its elements: elements have no key
+        val opt_targets: opt[*Value] = get(?t, "project.targets");
+        if (!sel opt_targets.some)                   { ret 19; }
+        if (!span_is(opt_targets.some.span, 80, 18)) { ret 20; }
+        val opt_linux: opt[*Value] = array_get(?opt_targets.some.data.array, 0);
+        if (!sel opt_linux.some)                  { ret 21; }
+        if (!span_is(opt_linux.some.span, 82, 7)) { ret 22; }
+        if (!span_is(opt_linux.some.key, 0, 0))   { ret 23; }
+        val opt_win: opt[*Value] = array_get(?opt_targets.some.data.array, 1);
+        if (!sel opt_win.some)                  { ret 24; }
+        if (!span_is(opt_win.some.span, 91, 5)) { ret 25; }
+
+        # a quoted header segment keeps its quotes; the outer table an earlier
+        # header defined is not re-stamped by being passed through
+        val quoted: *Value = find_by_seg(?opt_project.some.data.table, "quoted key", 10);
+        if (quoted == nil)                          { ret 26; }
+        if (!span_is(quoted.span, 99, 22))          { ret 27; }
+        if (!span_is(quoted.key, 108, 12))          { ret 28; }
+        if (!span_is(opt_project.some.span, 11, 9)) { ret 29; }
+
+        # an inline table is the braces; its entries are positioned like any other
+        val opt_table_entry: opt[*Value] = get(?quoted.data.table, "x");
+        if (!sel opt_table_entry.some)                    { ret 30; }
+        if (!span_is(opt_table_entry.some.span, 126, 12)) { ret 31; }
+        val opt_x_y: opt[*Value] = get(?quoted.data.table, "x.y");
+        if (!sel opt_x_y.some)                   { ret 32; }
+        if (!span_is(opt_x_y.some.key, 128, 1))  { ret 33; }
+        if (!span_is(opt_x_y.some.span, 132, 4)) { ret 34; }
+
+        # an array of tables: the array is positioned at the segment that first
+        # named it, each element at the header that appended it
+        val opt_artifact: opt[*Value] = get(?t, "artifact");
+        if (!sel opt_artifact.some)                   { ret 35; }
+        if (!span_is(opt_artifact.some.span, 141, 8)) { ret 36; }
+        if (!span_is(opt_artifact.some.key, 141, 8))  { ret 37; }
+        val opt_first: opt[*Value] = array_get(?opt_artifact.some.data.array, 0);
+        if (!sel opt_first.some)                    { ret 38; }
+        if (!span_is(opt_first.some.span, 139, 12)) { ret 39; }
+        val opt_second: opt[*Value] = array_get(?opt_artifact.some.data.array, 1);
+        if (!sel opt_second.some)                    { ret 40; }
+        if (!span_is(opt_second.some.span, 165, 12)) { ret 41; }
+        if (!span_is(opt_second.some.key, 167, 8))   { ret 42; }
+        val opt_kind: opt[*Value] = get(?opt_second.some.data.table, "kind");
+        if (!sel opt_kind.some)                   { ret 43; }
+        if (!span_is(opt_kind.some.key, 178, 4))  { ret 44; }
+        if (!span_is(opt_kind.some.span, 185, 5)) { ret 45; }
+
+        dnit(?a, ?t);
+        if (c.live != 0) { ret 46; }
+        ret 0;
+    }
+
+    # a header that names a table a deeper header created first re-positions it
+    # at the header, so a missing key is reported against the definition
+    test toml__header_restamps_implicit_table {
+        var c: testing.Counting;
+        var a: Allocator;
+        testing.counting_make(?c, ?a);
+
+        val res_parse: res[Table, TomlError] = parse(?a, "[a.b]\nx = 1\n[a]\nc = 2\n");
+        if (sel res_parse.err) { ret 2; }
+        var t:         Table       = res_parse.ok;
+        val opt_entry: opt[*Value] = get(?t, "a");
+        if (!sel opt_entry.some)                  { ret 3; }
+        if (!span_is(opt_entry.some.span, 12, 3)) { ret 4; }
+        if (!span_is(opt_entry.some.key, 13, 1))  { ret 5; }
+        val opt_a_b: opt[*Value] = get(?t, "a.b");
+        if (!sel opt_a_b.some)                 { ret 6; }
+        if (!span_is(opt_a_b.some.key, 3, 1))  { ret 7; }
+        if (!span_is(opt_a_b.some.span, 0, 5)) { ret 8; }
+
+        dnit(?a, ?t);
+        if (c.live != 0) { ret 9; }
+        ret 0;
+    }
+}
