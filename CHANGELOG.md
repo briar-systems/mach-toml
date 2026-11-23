@@ -8,3 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Each release groups its entries under `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed` and `Security`, and marks a breaking change inside the entry.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-11-23
+
+### Added
+
+- Initial release for Mach 7 and `std` `^10.0.0`: TOML 1.0 parser and table representation (`toml.parse`, `toml.tree`), dotted-path typed lookups (`toml.lookup`, `toml.value`), and structured parse errors (`toml.error`).
